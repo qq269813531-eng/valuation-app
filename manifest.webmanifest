@@ -1,19 +1,20 @@
 {
-  "name": "估值温度计 · 五大指数买入时机",
-  "short_name": "估值温度计",
-  "description": "中证红利、中证红利低波、港股通高股息、纳指100、标普500 的估值分位与定投倍数",
+  "name": "ETF 温度计 · 五只ETF估值看板",
+  "short_name": "ETF温度计",
+  "description": "跟踪 515080 / 513530 / 563020 / 513100 / 513650 的盘中价格、PE 估值分位、股息率、场内溢价与买入建议",
   "lang": "zh-CN",
   "dir": "ltr",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f2f4f7",
-  "theme_color": "#0b2c1c",
+  "background_color": "#14532d",
+  "theme_color": "#14532d",
   "categories": ["finance", "utilities"],
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
+    { "src": "icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" },
+    { "src": "maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
