@@ -1,4 +1,4 @@
-﻿/* ETF 温度计 —— 盘中行情 + 估值分位 + 买卖建议
+/* ETF 温度计 —— 盘中行情 + 估值分位 + 买卖建议
    数据：data.js（Actions 每日生成） + 东财实时行情（浏览器直连） */
 (function () {
   'use strict';
@@ -443,7 +443,7 @@
     var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
     var y10txt = m.y10 == null ? '—' : num(m.y10, 2) + '%' + (DATA.treasury && DATA.treasury.date ? '（' + DATA.treasury.date + '）' : '');
     var kvRows = m.isDiv ? [
-      ['股息率分位（1 年）', pctText(e.dyPct) + (e.dyLow == null ? '' : '（1 年区间 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
+      ['股息率分位（1 年）', pctText(e.dyPct) + (e.dyLow == null ? '' : '（1 年 P10–P90 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
       ['股息率', dyText(m.dy)],
       ['股息利差', m.spread == null ? '—' : signed(m.spread, 2), m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')],
       ['10 年国债', y10txt],
@@ -471,7 +471,7 @@
     }).join('');
 
     var reasons = m.isDiv ? [
-      '股息率分位 ' + pctText(e.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在近 1 年里排第几，越高越便宜',
+      '股息率分位 ' + pctText(e.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在过去 1 年里排第几（去掉两端各 10% 极端值后拉成 0–100），越高越便宜',
       m.spread == null ? '股息利差缺失' : '股息利差 ' + signed(m.spread, 2) + '（' + num(m.dy, 2) + '% − 10 年国债 ' + num(m.y10, 2) + '%）' +
         (m.spread >= 4 ? '，高利差把档位抬了一档' : (m.spread < 2 ? '，利差偏薄把档位降了一档' : '，利差在中位，不调整档位')),
       '结论：' + L.label + ' · ' + L.action

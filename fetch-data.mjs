@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 五只 ETF 跟踪数据生成器
  *
  * 运行： node fetch-data.mjs
@@ -141,9 +141,9 @@ async function emQuotes(secids) {
 }
 
 /** 日线（最近 n 根）：[{ date: 'YYYY-MM-DD', close }] */
-async function emKline(secid, lmt = 20) {
+async function emKline(secid, lmt = 20, fqt = 1) {
   const url =
-    `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=1&lmt=${lmt}` +
+    `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=${fqt}&lmt=${lmt}` +
     `&end=20500101&fields1=f1,f2,f3&fields2=f51,f53`;
   const j = await getJSON(url);
   return (j?.data?.klines || []).map((line) => {
@@ -159,7 +159,8 @@ async function emKline(secid, lmt = 20) {
  * 再看今天的股息率在过去 250 个交易日里排第几。股息率高 = 价格便宜，所以这个分位越高越便宜。
  */
 async function dyPercentile(secid, records) {
-  const k = await emKline(secid, 300);
+  // 注意：分红金额是每份名义金额，价格必须用不复权（fqt=0），否则前复权价会把历史股息率抬高
+  const k = await emKline(secid, 300, 0);
   const rows = k.filter((x) => x.close > 0).slice(-250);
   if (rows.length < 60) throw new Error('价格序列太短');
   const year = 365 * 86400000;
@@ -171,13 +172,26 @@ async function dyPercentile(secid, records) {
   }).filter((x) => x.dy != null);
   if (!series.length) throw new Error('无分红，无法算股息率分位');
   const last = series[series.length - 1].dy;
-  let below = 0;
-  for (const s of series) if (s.dy <= last) below += 1;
+  // 用 P10–P90 当刻度：分红是滚动 12 个月加总，分红笔数变化会造成假峰假谷，
+  // 直接拿 min/max 会被这些极端值带偏，所以把两端各切掉 10% 再拉成 0–100。
+  const vals = series.map((s) => s.dy).sort((a, b) => a - b);
+  const q = (p) => {
+    const idx = (vals.length - 1) * p;
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo);
+  };
+  const p10 = q(0.1);
+  const p90 = q(0.9);
+  const span = p90 - p10 || 1;
+  const pct = Math.max(0, Math.min(100, ((last - p10) / span) * 100));
   return {
-    dyPct: round((below / series.length) * 100, 1),
+    dyPct: round(pct, 1),
     dyNow: round(last, 2),
-    dyLow: round(Math.min(...series.map((s) => s.dy)), 2),
-    dyHigh: round(Math.max(...series.map((s) => s.dy)), 2),
+    dyLow: round(p10, 2),
+    dyHigh: round(p90, 2),
+    dyMin: round(vals[0], 2),
+    dyMax: round(vals[vals.length - 1], 2),
   };
 }
 
@@ -332,28 +346,53 @@ async function fairNav(etf, nav, navDate) {
 
 /** 近 365 天每份现金分红合计（元/份）。数据来自天天基金「分红送配」页。 */
 async function emDividend(code) {
-  const html = await getText(`https://fundf10.eastmoney.com/fhsp_${code}.html`, {
-    Referer: 'https://fundf10.eastmoney.com/',
-  });
-  const re =
-    /<tr><td[^>]*>\d{4}年<\/td><td[^>]*>([\d-]+)<\/td><td[^>]*>[\d-]*<\/td><td[^>]*>每10份派现金([\d.]+)元<\/td><td[^>]*>[\d-]*<\/td><\/tr>/g;
-  const cutoff = Date.now() - 365 * 86400000;
-  let sum = 0;
-  let count = 0;
-  let m;
-  const records = [];
-  while ((m = re.exec(html))) {
-    const ts = Date.parse(m[1]);
-    if (Number.isNaN(ts)) continue;
-    const amount = Number(m[2]) / 10; // 每份派现
-    records.push({ date: m[1], ts, amount });
-    if (ts >= cutoff) {
-      sum += amount;
-      count += 1;
+  // 天天基金偶尔会返回结构异常的页面，单笔每份派现超过 0.2 元基本可判定是误解析，重试一次再放弃
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const html = await getText(`https://fundf10.eastmoney.com/fhsp_${code}.html`, {
+        Referer: 'https://fundf10.eastmoney.com/',
+      });
+      const re =
+        /<tr><td[^>]*>\d{4}年<\/td><td[^>]*>([\d-]+)<\/td><td[^>]*>[\d-]*<\/td><td[^>]*>每10份派现金([\d.]+)元<\/td><td[^>]*>[\d-]*<\/td><\/tr>/g;
+      const cutoff = Date.now() - 365 * 86400000;
+      let sum = 0;
+      let count = 0;
+      let m;
+      let bad = false;
+      const records = [];
+      while ((m = re.exec(html))) {
+        const ts = Date.parse(m[1]);
+        if (Number.isNaN(ts)) continue;
+        const amount = Number(m[2]) / 10; // 每份派现
+        if (!Number.isFinite(amount) || amount > 0.2) {
+          bad = true;
+          break;
+        }
+        records.push({ date: m[1], ts, amount });
+        if (ts >= cutoff) {
+          sum += amount;
+          count += 1;
+        }
+      }
+      if (bad) {
+        lastErr = new Error('分红表解析异常（单笔金额过大）');
+        await sleep(600);
+        continue;
+      }
+      if (count > 0 && sum / count > 0.2) {
+        lastErr = new Error('分红表解析异常（均值过大）');
+        await sleep(600);
+        continue;
+      }
+      records.sort((a, b) => a.ts - b.ts);
+      return { ttmDiv: round(sum, 4) || 0, divCount: count, records };
+    } catch (e) {
+      lastErr = e;
+      await sleep(600);
     }
   }
-  records.sort((a, b) => a.ts - b.ts);
-  return { ttmDiv: round(sum, 4) || 0, divCount: count, records };
+  throw lastErr || new Error('分红表获取失败');
 }
 
 /* ---------------- 主流程 ---------------- */

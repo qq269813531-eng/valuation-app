@@ -1,4 +1,4 @@
-﻿/* ETF 温度计 · Service Worker
+/* ETF 温度计 · Service Worker
    策略：联网优先。有网就拿最新文件，没网才用缓存里那份。
    这样改了代码刷新就能看到，不用清缓存。 */
 const CACHE = 'etf-temp-v13';
