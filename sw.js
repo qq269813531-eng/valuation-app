@@ -6,12 +6,12 @@ const CACHE = 'valuation-app-v1';
 const ASSETS = [
   './',
   './index.html',
-  './assets/app.css',
-  './assets/app.js',
+  './app.css',
+  './app.js',
   './data.js',
   './manifest.webmanifest',
-  './assets/icon-192.png',
-  './assets/icon-512.png'
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (e) => {
