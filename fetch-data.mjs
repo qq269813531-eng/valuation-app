@@ -152,6 +152,35 @@ async function emKline(secid, lmt = 20) {
   });
 }
 
+/* ---------------- 股息率分位 ---------------- */
+
+/**
+ * 近 1 年股息率分位：用 ETF 自己的日收盘价和分红记录，逐日还原「过去 12 个月分红 ÷ 当日价格」，
+ * 再看今天的股息率在过去 250 个交易日里排第几。股息率高 = 价格便宜，所以这个分位越高越便宜。
+ */
+async function dyPercentile(secid, records) {
+  const k = await emKline(secid, 300);
+  const rows = k.filter((x) => x.close > 0).slice(-250);
+  if (rows.length < 60) throw new Error('价格序列太短');
+  const year = 365 * 86400000;
+  const series = rows.map((row) => {
+    const ts = Date.parse(row.date);
+    let ttm = 0;
+    for (const r of records) if (r.ts <= ts && r.ts > ts - year) ttm += r.amount;
+    return { date: row.date, dy: ttm > 0 ? (ttm / row.close) * 100 : null };
+  }).filter((x) => x.dy != null);
+  if (!series.length) throw new Error('无分红，无法算股息率分位');
+  const last = series[series.length - 1].dy;
+  let below = 0;
+  for (const s of series) if (s.dy <= last) below += 1;
+  return {
+    dyPct: round((below / series.length) * 100, 1),
+    dyNow: round(last, 2),
+    dyLow: round(Math.min(...series.map((s) => s.dy)), 2),
+    dyHigh: round(Math.max(...series.map((s) => s.dy)), 2),
+  };
+}
+
 /* ---------------- 国债收益率 ---------------- */
 
 /**
@@ -312,14 +341,19 @@ async function emDividend(code) {
   let sum = 0;
   let count = 0;
   let m;
+  const records = [];
   while ((m = re.exec(html))) {
     const ts = Date.parse(m[1]);
-    if (!Number.isNaN(ts) && ts >= cutoff) {
-      sum += Number(m[2]) / 10;
+    if (Number.isNaN(ts)) continue;
+    const amount = Number(m[2]) / 10; // 每份派现
+    records.push({ date: m[1], ts, amount });
+    if (ts >= cutoff) {
+      sum += amount;
       count += 1;
     }
   }
-  return { ttmDiv: round(sum, 4) || 0, divCount: count };
+  records.sort((a, b) => a.ts - b.ts);
+  return { ttmDiv: round(sum, 4) || 0, divCount: count, records };
 }
 
 /* ---------------- 主流程 ---------------- */
@@ -343,6 +377,9 @@ async function buildOne(cfg, quotes) {
     pricePct: null,
     pxLow: null,
     pxHigh: null,
+    dyPct: null,
+    dyLow: null,
+    dyHigh: null,
     composite: null,
     dy: null,
     ttmDiv: null,
@@ -407,6 +444,13 @@ async function buildOne(cfg, quotes) {
     const div = await emDividend(cfg.code);
     out.ttmDiv = div.ttmDiv;
     out.divCount = div.divCount;
+    if (div.ttmDiv > 0 && div.records.length) {
+      const dstat = await dyPercentile(cfg.secid, div.records);
+      out.dyPct = dstat.dyPct;
+      out.dyLow = dstat.dyLow;
+      out.dyHigh = dstat.dyHigh;
+      out.dyHistoryBasis = '近 250 个交易日，按每日收盘价与滚动 12 个月分红还原';
+    }
     const px = out.price || null;
     out.dy = px && out.ttmDiv != null ? round((out.ttmDiv / px) * 100, 2) : null;
   } catch (e) {

@@ -1,7 +1,7 @@
 /* 自动生成，勿手改；重新生成：node fetch-data.mjs */
 window.ETF_DATA = {
-  "generatedAt": "2026/11/23 20:36:40",
-  "generatedAtISO": "2026-11-23T12:36:40.739Z",
+  "generatedAt": "2026/11/23 20:46:04",
+  "generatedAtISO": "2026-11-23T12:46:04.724Z",
   "model": "pe-percentile-5y-v1",
   "source": "东方财富行情 · 蛋卷基金估值 · 中证指数官网 · 中债国债收益率",
   "treasury": {
@@ -39,6 +39,9 @@ window.ETF_DATA = {
       "pricePct": 72.3,
       "pxLow": 4562,
       "pxHigh": 5976.53,
+      "dyPct": 80.4,
+      "dyLow": 2.96,
+      "dyHigh": 5.46,
       "composite": 74.5,
       "dy": 4.52,
       "ttmDiv": 0.07,
@@ -1080,7 +1083,8 @@ window.ETF_DATA = {
       ],
       "valNote": "蛋卷基金指数估值",
       "navIdxClose": 5492.17,
-      "navIdxDate": "2026-11-23"
+      "navIdxDate": "2026-11-23",
+      "dyHistoryBasis": "近 250 个交易日，按每日收盘价与滚动 12 个月分红还原"
     },
     {
       "code": "513530",
@@ -1111,6 +1115,9 @@ window.ETF_DATA = {
       "pricePct": 77.9,
       "pxLow": 2623.15,
       "pxHigh": 5466.49,
+      "dyPct": 75.2,
+      "dyLow": 4.15,
+      "dyHigh": 9.68,
       "composite": 81.5,
       "dy": 8.09,
       "ttmDiv": 0.12,
@@ -3192,7 +3199,8 @@ window.ETF_DATA = {
       ],
       "valNote": "中证指数官网（自算 5 年 PE 分位）",
       "navIdxClose": 4922.93,
-      "navIdxDate": "2026-11-23"
+      "navIdxDate": "2026-11-23",
+      "dyHistoryBasis": "近 250 个交易日，按每日收盘价与滚动 12 个月分红还原"
     },
     {
       "code": "563020",
@@ -3223,6 +3231,9 @@ window.ETF_DATA = {
       "pricePct": 91.8,
       "pxLow": 8378.54,
       "pxHigh": 11946.95,
+      "dyPct": 38.4,
+      "dyLow": 3.02,
+      "dyHigh": 5.06,
       "composite": 80.5,
       "dy": 3.9,
       "ttmDiv": 0.048,
@@ -4264,7 +4275,8 @@ window.ETF_DATA = {
       ],
       "valNote": "蛋卷基金指数估值",
       "navIdxClose": 11493.88,
-      "navIdxDate": "2026-11-23"
+      "navIdxDate": "2026-11-23",
+      "dyHistoryBasis": "近 250 个交易日，按每日收盘价与滚动 12 个月分红还原"
     },
     {
       "code": "513100",
@@ -4287,7 +4299,7 @@ window.ETF_DATA = {
       "navChangePct": -5.57,
       "purchase": "暂停申购",
       "fairNav": 1.672,
-      "fairBasis": "纳指100 22617.73→22617.73（2026-11-20→2026-11-20），USDCNH 6.6752→6.6657",
+      "fairBasis": "纳指100 22617.73→22617.73（2026-11-20→2026-11-20），USDCNH 6.6752→6.6681",
       "pe": 25.46,
       "pb": 7.886,
       "pePct": 15.3,
@@ -4295,6 +4307,9 @@ window.ETF_DATA = {
       "pricePct": 79.3,
       "pxLow": 10213.29,
       "pxHigh": 27599.89,
+      "dyPct": null,
+      "dyLow": null,
+      "dyHigh": null,
       "composite": 49.6,
       "dy": 0,
       "ttmDiv": 0,
@@ -5352,8 +5367,8 @@ window.ETF_DATA = {
       "navDate": "2026-11-20",
       "navChangePct": -3.69,
       "purchase": "场内买入",
-      "fairNav": 1.669,
-      "fairBasis": "标普500 6910.39→6910.39（2026-11-20→2026-11-20），USDCNH 6.6752→6.6657",
+      "fairNav": 1.67,
+      "fairBasis": "标普500 6910.39→6910.39（2026-11-20→2026-11-20），USDCNH 6.6752→6.6681",
       "pe": 22.37,
       "pb": 5.05,
       "pePct": 21.8,
@@ -5361,6 +5376,9 @@ window.ETF_DATA = {
       "pricePct": 85.7,
       "pxLow": 3577.03,
       "pxHigh": 7818.93,
+      "dyPct": null,
+      "dyLow": null,
+      "dyHigh": null,
       "composite": 63.3,
       "dy": 0,
       "ttmDiv": 0,
