@@ -1,7 +1,7 @@
 /* 自动生成，勿手改；重新生成：node fetch-data.mjs */
 window.ETF_DATA = {
-  "generatedAt": "2026/11/23 18:54:25",
-  "generatedAtISO": "2026-11-23T10:54:25.089Z",
+  "generatedAt": "2026/11/23 20:06:33",
+  "generatedAtISO": "2026-11-23T12:06:33.089Z",
   "model": "pe-percentile-5y-v1",
   "source": "东方财富行情 · 蛋卷基金估值 · 中证指数官网",
   "etfs": [
@@ -21,9 +21,9 @@ window.ETF_DATA = {
       "price": 1.55,
       "changePct": -0.58,
       "quoteTime": "2026-11-23T08:11:58.000Z",
-      "nav": 1.5629,
-      "navDate": "2026-11-20",
-      "navChangePct": -0.31,
+      "nav": 1.5523,
+      "navDate": "2026-11-23",
+      "navChangePct": -0.68,
       "purchase": "场内买入",
       "fairNav": null,
       "fairBasis": null,
@@ -31,7 +31,9 @@ window.ETF_DATA = {
       "pb": 0.907,
       "pePct": 89,
       "pbPct": 62.2,
-      "dy": 4.4,
+      "dy": 4.52,
+      "ttmDiv": 0.07,
+      "divCount": 4,
       "valDate": "2026-11-23",
       "history": [
         [
@@ -1068,8 +1070,8 @@ window.ETF_DATA = {
         ]
       ],
       "valNote": "蛋卷基金指数估值",
-      "navIdxClose": 5529.78,
-      "navIdxDate": "2026-11-20"
+      "navIdxClose": 5492.17,
+      "navIdxDate": "2026-11-23"
     },
     {
       "code": "513530",
@@ -1087,9 +1089,9 @@ window.ETF_DATA = {
       "price": 1.483,
       "changePct": -0.54,
       "quoteTime": "2026-11-23T08:11:44.000Z",
-      "nav": 1.5024,
-      "navDate": "2026-11-20",
-      "navChangePct": -1.16,
+      "nav": 1.4897,
+      "navDate": "2026-11-23",
+      "navChangePct": -0.85,
       "purchase": "场内买入",
       "fairNav": null,
       "fairBasis": null,
@@ -1097,7 +1099,9 @@ window.ETF_DATA = {
       "pb": null,
       "pePct": 85.1,
       "pbPct": null,
-      "dy": null,
+      "dy": 8.09,
+      "ttmDiv": 0.12,
+      "divCount": 12,
       "valDate": "2026-11-22",
       "history": [
         [
@@ -3174,8 +3178,8 @@ window.ETF_DATA = {
         ]
       ],
       "valNote": "中证指数官网（自算 5 年 PE 分位）",
-      "navIdxClose": 4965.76,
-      "navIdxDate": "2026-11-20"
+      "navIdxClose": 4922.93,
+      "navIdxDate": "2026-11-23"
     },
     {
       "code": "563020",
@@ -3193,9 +3197,9 @@ window.ETF_DATA = {
       "price": 1.232,
       "changePct": -1.12,
       "quoteTime": "2026-11-23T08:11:58.000Z",
-      "nav": 1.2497,
-      "navDate": "2026-11-20",
-      "navChangePct": 0.32,
+      "nav": 1.2361,
+      "navDate": "2026-11-23",
+      "navChangePct": -1.09,
       "purchase": "场内买入",
       "fairNav": null,
       "fairBasis": null,
@@ -3203,7 +3207,9 @@ window.ETF_DATA = {
       "pb": 0.941,
       "pePct": 80.2,
       "pbPct": 69.5,
-      "dy": 4.4,
+      "dy": 3.9,
+      "ttmDiv": 0.048,
+      "divCount": 4,
       "valDate": "2026-11-23",
       "history": [
         [
@@ -4240,8 +4246,8 @@ window.ETF_DATA = {
         ]
       ],
       "valNote": "蛋卷基金指数估值",
-      "navIdxClose": 11620.32,
-      "navIdxDate": "2026-11-20"
+      "navIdxClose": 11493.88,
+      "navIdxDate": "2026-11-23"
     },
     {
       "code": "513100",
@@ -4264,12 +4270,14 @@ window.ETF_DATA = {
       "navChangePct": -2.17,
       "purchase": "暂停申购",
       "fairNav": 1.673,
-      "fairBasis": "纳指100 23879.2→22617.73（2026-11-19→2026-11-20），USDCNH 6.6924→6.667",
+      "fairBasis": "纳指100 23879.2→22617.73（2026-11-19→2026-11-20），USDCNH 6.6924→6.6669",
       "pe": 25.46,
       "pb": 7.886,
       "pePct": 15.3,
       "pbPct": 54.1,
-      "dy": 0.5,
+      "dy": 0,
+      "ttmDiv": 0,
+      "divCount": 0,
       "valDate": "2026-11-20",
       "history": [
         [
@@ -5319,17 +5327,19 @@ window.ETF_DATA = {
       "price": 1.837,
       "changePct": -0.54,
       "quoteTime": "2026-11-23T08:11:47.000Z",
-      "nav": 1.7356,
-      "navDate": "2026-11-19",
-      "navChangePct": -2,
+      "nav": 1.6715,
+      "navDate": "2026-11-20",
+      "navChangePct": -3.69,
       "purchase": "场内买入",
-      "fairNav": 1.665,
-      "fairBasis": "标普500 7175.83→6910.39（2026-11-19→2026-11-20），USDCNH 6.6924→6.667",
+      "fairNav": 1.669,
+      "fairBasis": "标普500 6910.39→6910.39（2026-11-20→2026-11-20），USDCNH 6.6752→6.6669",
       "pe": 22.37,
       "pb": 5.05,
       "pePct": 21.8,
       "pbPct": 82.3,
-      "dy": 1.1,
+      "dy": 0,
+      "ttmDiv": 0,
+      "divCount": 0,
       "valDate": "2026-11-20",
       "history": [
         [

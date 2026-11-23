@@ -1,164 +1,413 @@
 /**
- * 拉取指数估值数据，生成 ../data.js
+ * 五只 ETF 跟踪数据生成器
  *
- * 运行： node tools/fetch-data.mjs
+ * 运行： node fetch-data.mjs
  * 依赖： Node 18+（内置 fetch），无需 npm install
  *
- * 数据源：蛋卷基金「指数估值」公开接口（danjuanfunds.com）
- *  - pe / pb / 股息率(yeild)：接口直接给
- *  - pe_percentile / pb_percentile：接口给的历史分位（0~1），×100 后使用
- *  - 5 年 PE 序列：pe_history?day=5y，用于画走势图
+ * 输出： data.js（window.ETF_DATA）
  *
- * 港股通高股息(CNY, 930915)：蛋卷未收录，保持 manual=true，由 APP 内手动录入。
+ * 数据来源：
+ *  - 实时/收盘行情：东方财富 push2（ETF 价格、涨跌）
+ *  - 净值：天天基金 f10/lsjz（最新单位净值，用于估算溢价）
+ *  - 指数估值：
+ *      · 中证红利 000922 / 红利低波 H30269 / 纳指100 NDX / 标普500 SP500 → 蛋卷基金（PE/PB/股息率/分位）
+ *      · 港股通高股息 930914 → 中证指数官网 indexCsiDsPe（逐日 PE，自己算 5 年分位；无 PB、无双股息率）
+ *  - 美股指数日线：东方财富 kline（100.NDX / 100.SPX），用于估算 QDII 的公允净值
+ *  - 离岸人民币：东方财富 kline（133.USDCNH），用于 QDII 汇率修正
  */
 
 import { writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OUT = path.resolve(__dirname, '..', 'data.js');
+const OUT = path.resolve(__dirname, 'data.js');
 
-const API = 'https://danjuanfunds.com/djapi';
-const HDR = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-  Referer: 'https://danjuanfunds.com/',
-};
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const EM_UT = 'fa5fd1943c7b386f172d6893dbfba10b';
 
-/** 指数配置：顺序即 APP 展示顺序 */
-const INDEXES = [
+/** 五只 ETF 配置：数组顺序即卡片顺序 */
+const ETFS = [
   {
-    id: 'csi-dividend',
-    name: '中证红利',
-    code: '000922',
-    src: 'SH000922',
-    market: 'A股',
+    code: '515080',
+    name: '中证红利ETF',
+    fullName: '招商中证红利ETF',
+    indexCode: '000922',
+    indexName: '中证红利',
+    market: 'A',
     family: 'dividend',
-    weights: { pe: 0.45, pb: 0.2, dy: 0.35 },
+    secid: '1.515080',
+    indexSecid: '1.000922',
+    valSource: 'danjuan',
+    valKey: 'SH000922',
+    iopvMode: 'index',
   },
   {
-    id: 'csi-dividend-lv',
-    name: '中证红利低波',
-    code: 'H30269',
-    src: 'CSIH30269',
-    market: 'A股',
-    family: 'dividend',
-    weights: { pe: 0.45, pb: 0.2, dy: 0.35 },
+    code: '513530',
+    name: '港股通红利ETF',
+    fullName: '华泰柏瑞中证港股通高股息投资ETF(QDII)',
+    indexCode: '930914',
+    indexName: '港股通高股息',
+    market: 'HK',
+    family: 'hkDividend',
+    secid: '1.513530',
+    indexSecid: '2.930914',
+    valSource: 'csindex',
+    valKey: '930914',
+    iopvMode: 'index',
   },
   {
-    id: 'hk-hdy',
-    name: '港股通高股息(CNY)',
-    code: '930915',
-    src: null, // 无公开接口，APP 内手动录入
-    market: '港股通',
+    code: '563020',
+    name: '红利低波ETF',
+    fullName: '易方达中证红利低波动ETF',
+    indexCode: 'H30269',
+    indexName: '中证红利低波',
+    market: 'A',
     family: 'dividend',
-    weights: { pe: 0.45, pb: 0.2, dy: 0.35 },
-    // 没有历史序列时，用「PE → 分位」经验刻度换算（APP 里会标 * 提示非官方分位）
-    fallbackPeAnchors: [
-      [4.5, 98], [5.0, 95], [5.5, 90], [6.0, 84], [6.5, 76], [7.0, 67],
-      [7.5, 56], [8.0, 44], [8.5, 33], [9.0, 24], [9.5, 16], [10.0, 10],
-      [11.0, 5], [12.0, 2], [14.0, 1],
-    ],
+    secid: '1.563020',
+    indexSecid: '2.H30269',
+    valSource: 'danjuan',
+    valKey: 'CSIH30269',
+    iopvMode: 'index',
   },
   {
-    id: 'ndx',
-    name: '纳指100',
-    code: 'NDX',
-    src: 'NDX',
-    market: '美股',
+    code: '513100',
+    name: '纳指100ETF',
+    fullName: '国泰纳斯达克100ETF(QDII)',
+    indexCode: 'NDX',
+    indexName: '纳指100',
+    market: 'US',
     family: 'us',
-    weights: { pe: 0.6, pb: 0.4 },
+    secid: '1.513100',
+    indexSecid: '100.NDX',
+    valSource: 'danjuan',
+    valKey: 'NDX',
+    iopvMode: 'fair',
   },
   {
-    id: 'spx',
-    name: '标普500',
-    code: 'SP500',
-    src: 'SP500',
-    market: '美股',
+    code: '513650',
+    name: '标普500ETF',
+    fullName: '南方标普500ETF(QDII)',
+    indexCode: 'SP500',
+    indexName: '标普500',
+    market: 'US',
     family: 'us',
-    weights: { pe: 0.6, pb: 0.4 },
+    secid: '1.513650',
+    indexSecid: '100.SPX',
+    valSource: 'danjuan',
+    valKey: 'SP500',
+    iopvMode: 'fair',
   },
 ];
 
-const round = (v, n = 4) => (v == null ? null : Math.round(v * 10 ** n) / 10 ** n);
-const pct = (v) => (v == null ? null : round(v * 100, 2));
+const round = (v, n = 2) => (v == null || Number.isNaN(v) ? null : Math.round(v * 10 ** n) / 10 ** n);
+const toPct = (v) => (v == null ? null : round(v * 100, 1));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(pathname) {
-  const res = await fetch(API + pathname, { headers: HDR });
-  if (!res.ok) throw new Error(`${pathname} → HTTP ${res.status}`);
-  const json = await res.json();
-  if (!json.data) throw new Error(`${pathname} → 无 data（result_code=${json.result_code} ${json.message || ''}）`);
-  return json.data;
+async function getText(url, headers = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': UA, ...headers }, signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+const getJSON = async (url, headers) => JSON.parse(await getText(url, headers));
+
+/* ---------------- 行情 ---------------- */
+
+/** 批量行情：返回 { code: { price, changePct, change, quoteTime, name, digits } } */
+async function emQuotes(secids) {
+  const url =
+    `https://push2.eastmoney.com/api/qt/ulist.np/get?secids=${secids.join(',')}` +
+    `&fields=f1,f2,f3,f4,f12,f14,f124&ut=${EM_UT}`;
+  const j = await getJSON(url);
+  const out = {};
+  for (const d of j?.data?.diff || []) {
+    const digits = d.f1 ?? 2;
+    out[d.f12] = {
+      name: d.f14,
+      price: round(d.f2 / 10 ** digits, digits),
+      change: round(d.f4 / 10 ** digits, digits),
+      changePct: round(d.f3 / 100, 2),
+      quoteTime: d.f124 ? new Date(d.f124 * 1000) : null,
+    };
+  }
+  return out;
 }
 
-async function fetchOne(cfg) {
-  const base = {
-    id: cfg.id,
-    name: cfg.name,
-    code: cfg.code,
-    market: cfg.market,
-    family: cfg.family,
-    weights: cfg.weights,
-    manual: false,
+/** 日线（最近 n 根）：[{ date: 'YYYY-MM-DD', close }] */
+async function emKline(secid, lmt = 20) {
+  const url =
+    `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=1&lmt=${lmt}` +
+    `&end=20500101&fields1=f1,f2,f3&fields2=f51,f53`;
+  const j = await getJSON(url);
+  return (j?.data?.klines || []).map((line) => {
+    const [date, close] = line.split(',');
+    return { date, close: Number(close) };
+  });
+}
+
+/* ---------------- 净值 ---------------- */
+
+async function emNav(code) {
+  const url = `https://api.fund.eastmoney.com/f10/lsjz?fundCode=${code}&pageIndex=1&pageSize=1`;
+  const j = await getJSON(url, { Referer: 'https://fundf10.eastmoney.com/' });
+  const row = j?.Data?.LSJZList?.[0];
+  if (!row) throw new Error('净值为空');
+  return {
+    nav: Number(row.DWJZ),
+    navDate: row.FSRQ,
+    navChangePct: Number(row.JZZZL),
+    purchase: row.SGZT || '',
+  };
+}
+
+/* ---------------- 估值 ---------------- */
+
+async function danjuanValuation(srcKey) {
+  const hdr = { Referer: 'https://danjuanfunds.com/' };
+  const detail = await getJSON(`https://danjuanfunds.com/djapi/index_eva/detail/${srcKey}`, hdr);
+  if (!detail?.data) throw new Error(`蛋卷无数据（${srcKey}）`);
+  const d = detail.data;
+  let history = [];
+  try {
+    const h = await getJSON(`https://danjuanfunds.com/djapi/index_eva/pe_history/${srcKey}?day=5y`, hdr);
+    history = (h?.data?.index_eva_pe_growths || []).map((x) => [x.ts, round(x.pe, 3)]);
+  } catch {
+    history = [];
+  }
+  return {
+    pe: round(d.pe, 2),
+    pb: round(d.pb, 3),
+    pePct: toPct(d.pe_percentile),
+    pbPct: toPct(d.pb_percentile),
+    dy: toPct(d.yeild),
+    valDate: d.date ? `${new Date(d.ts).getUTCFullYear()}-${String(d.date).slice(0, 5)}` : null,
+    history,
+    note: '蛋卷基金指数估值',
+  };
+}
+
+/** 中证指数官网逐日 PE（920914 这类蛋卷没覆盖的指数用） */
+async function csindexValuation(indexCode) {
+  const url = `https://www.csindex.com.cn/csindex-home/perf/indexCsiDsPe?indexCode=${indexCode}`;
+  const j = await getJSON(url, { Referer: 'https://www.csindex.com.cn/' });
+  const rows = (j?.data || []).filter((x) => x.peg != null && Number.isFinite(Number(x.peg)));
+  if (!rows.length) throw new Error('中证 PE 为空');
+  const history = rows.map((x) => {
+    const s = String(x.tradeDate);
+    const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    return [Date.parse(`${iso}T00:00:00+08:00`), round(Number(x.peg), 3)];
+  });
+  const window = history.slice(-1250); // 约 5 年（逐日）
+  const last = window[window.length - 1][1];
+  const below = window.filter(([, v]) => v < last).length;
+  // 曲线按周抽样，和蛋卷的 5 年周线口径一致
+  const weekly = [];
+  for (let i = 0; i < history.length; i += 5) weekly.push(history[i]);
+  if (weekly.length && weekly[weekly.length - 1][0] !== history[history.length - 1][0]) {
+    weekly.push(history[history.length - 1]);
+  }
+  return {
+    pe: round(last, 2),
+    pb: null,
+    pePct: round((below / window.length) * 100, 1),
+    pbPct: null,
+    dy: null,
+    valDate: new Date(history[history.length - 1][0]).toISOString().slice(0, 10),
+    history: weekly.slice(-1250),
+    note: '中证指数官网（自算 5 年 PE 分位）',
+  };
+}
+
+/* ---------------- QDII 公允净值 ---------------- */
+
+function closeOnOrBefore(rows, isoDate) {
+  let hit = null;
+  for (const r of rows) {
+    if (r.date <= isoDate) hit = r;
+    else break;
+  }
+  return hit;
+}
+
+async function fairNav(etf, nav, navDate) {
+  try {
+    const [idx, fx] = await Promise.all([emKline(etf.indexSecid, 40), emKline('133.USDCNH', 40)]);
+    const atNav = closeOnOrBefore(idx, navDate);
+    const last = idx[idx.length - 1];
+    const fxAtNav = closeOnOrBefore(fx, navDate);
+    const fxLast = fx[fx.length - 1];
+    if (!atNav || !last || !fxAtNav || !fxLast || !atNav.close || !fxAtNav.close) throw new Error('缺少指数/汇率数据');
+    const ratio = (last.close / atNav.close) * (fxLast.close / fxAtNav.close);
+    return {
+      fairNav: round(nav * ratio, 3),
+      basis: `${etf.indexName} ${atNav.close}→${last.close}（${atNav.date}→${last.date}），USDCNH ${fxAtNav.close}→${fxLast.close}`,
+    };
+  } catch (e) {
+    return { fairNav: null, basis: `公允净值估算失败：${e.message}` };
+  }
+}
+
+/* ---------------- 分红 ---------------- */
+
+/** 近 365 天每份现金分红合计（元/份）。数据来自天天基金「分红送配」页。 */
+async function emDividend(code) {
+  const html = await getText(`https://fundf10.eastmoney.com/fhsp_${code}.html`, {
+    Referer: 'https://fundf10.eastmoney.com/',
+  });
+  const re =
+    /<tr><td[^>]*>\d{4}年<\/td><td[^>]*>([\d-]+)<\/td><td[^>]*>[\d-]*<\/td><td[^>]*>每10份派现金([\d.]+)元<\/td><td[^>]*>[\d-]*<\/td><\/tr>/g;
+  const cutoff = Date.now() - 365 * 86400000;
+  let sum = 0;
+  let count = 0;
+  let m;
+  while ((m = re.exec(html))) {
+    const ts = Date.parse(m[1]);
+    if (!Number.isNaN(ts) && ts >= cutoff) {
+      sum += Number(m[2]) / 10;
+      count += 1;
+    }
+  }
+  return { ttmDiv: round(sum, 4) || 0, divCount: count };
+}
+
+/* ---------------- 主流程 ---------------- */
+
+async function buildOne(cfg, quotes) {
+  const out = {
+    ...cfg,
+    price: null,
+    changePct: null,
+    quoteTime: null,
+    nav: null,
+    navDate: null,
+    navChangePct: null,
+    purchase: '',
+    fairNav: null,
+    fairBasis: null,
     pe: null,
     pb: null,
     pePct: null,
     pbPct: null,
     dy: null,
-    dyPct: null, // 接口不提供股息率分位，APP 用绝对水平映射
-    date: null,
+    ttmDiv: null,
+    divCount: 0,
+    valDate: null,
     history: [],
+    valNote: '',
   };
-  if (cfg.fallbackPeAnchors) base.fallbackPeAnchors = cfg.fallbackPeAnchors;
 
-  if (!cfg.src) {
-    return { ...base, manual: true, pending: true };
+  const q = quotes[cfg.code];
+  if (q) {
+    out.price = q.price;
+    out.changePct = q.changePct;
+    out.quoteTime = q.quoteTime ? q.quoteTime.toISOString() : null;
   }
 
-  const d = await api(`/index_eva/detail/${cfg.src}`);
-  const history = await api(`/index_eva/pe_history/${cfg.src}?day=5y`)
-    .then((h) => (h.index_eva_pe_growths || []).map((x) => [x.ts, round(x.pe, 3)]))
-    .catch(() => []);
+  try {
+    const nav = await emNav(cfg.code);
+    Object.assign(out, nav);
+  } catch (e) {
+    out.navError = e.message;
+  }
 
-  return {
-    ...base,
-    pe: round(d.pe, 2),
-    pb: round(d.pb, 3),
-    pePct: pct(d.pe_percentile),
-    pbPct: pct(d.pb_percentile),
-    dy: pct(d.yeild),
-    date: d.date ? `${new Date(d.ts).getUTCFullYear()}-${d.date}` : null,
-    sourceType: d.eva_type, // low / mid / high，数据源自带分类，仅作对照
-    history,
-  };
+  // 盘中估算净值要用「净值日当天的指数收盘」做锚点，否则跨休市日会重复计算涨跌
+  if (cfg.iopvMode === 'index' && out.nav && out.navDate) {
+    try {
+      const k = await emKline(cfg.indexSecid, 40);
+      const anchor = closeOnOrBefore(k, out.navDate);
+      if (anchor) {
+        out.navIdxClose = anchor.close;
+        out.navIdxDate = anchor.date;
+      }
+    } catch (e) {
+      out.navError = `指数锚点失败：${e.message}`;
+    }
+  }
+
+  if (cfg.iopvMode === 'fair' && out.nav && out.navDate) {
+    const f = await fairNav(cfg, out.nav, out.navDate);
+    out.fairNav = f.fairNav;
+    out.fairBasis = f.basis;
+  }
+
+  try {
+    const v = cfg.valSource === 'csindex' ? await csindexValuation(cfg.valKey) : await danjuanValuation(cfg.valKey);
+    Object.assign(out, {
+      pe: v.pe,
+      pb: v.pb,
+      pePct: v.pePct,
+      pbPct: v.pbPct,
+      dy: v.dy,
+      valDate: v.valDate,
+      history: v.history.slice(-1250),
+      valNote: v.note,
+    });
+  } catch (e) {
+    out.valError = e.message;
+  }
+
+  // 股息率用这只 ETF 自己的实际分红（近 12 个月每份分红 ÷ 现价），不用指数的估算值
+  try {
+    const div = await emDividend(cfg.code);
+    out.ttmDiv = div.ttmDiv;
+    out.divCount = div.divCount;
+    const px = out.price || null;
+    out.dy = px && out.ttmDiv != null ? round((out.ttmDiv / px) * 100, 2) : null;
+  } catch (e) {
+    out.divError = e.message;
+  }
+
+  return out;
 }
 
-const main = async () => {
-  const indices = [];
-  for (const cfg of INDEXES) {
-    try {
-      const one = await fetchOne(cfg);
-      indices.push(one);
-      console.log(
-        `✓ ${one.name.padEnd(16, ' ')} ${one.manual ? '手动录入' : `PE ${one.pe} (分位 ${one.pePct}%)  PB ${one.pb}  DY ${one.dy}%  曲线 ${one.history.length} 点`}`,
-      );
-    } catch (err) {
-      console.warn(`✗ ${cfg.name} 抓取失败：${err.message}`);
-      indices.push({ ...INDEXES.find((x) => x.id === cfg.id), manual: true, pending: true, pe: null, pb: null, pePct: null, pbPct: null, dy: null, dyPct: null, date: null, history: [] });    }
-    await new Promise((r) => setTimeout(r, 300)); // 轻一点，别把人家接口打挂
+async function main() {
+  const secids = [...ETFS.map((e) => e.secid), ...ETFS.map((e) => e.indexSecid)];
+  let quotes = {};
+  try {
+    quotes = await emQuotes(secids);
+  } catch (e) {
+    console.warn('行情获取失败：', e.message);
   }
 
+  const etfs = [];
+  for (const cfg of ETFS) {
+    try {
+      const one = await buildOne(cfg, quotes);
+      etfs.push(one);
+      console.log(
+        `✓ ${one.code} ${one.name}  价 ${one.price ?? '--'} (${one.changePct ?? '--'}%)  ` +
+          `净值 ${one.nav ?? '--'}@${one.navDate ?? '--'}  PE ${one.pe ?? '--'} 分位 ${one.pePct ?? '--'}%  ` +
+          `DY ${one.dy ?? '--'}%  曲线 ${one.history.length} 点`,
+      );
+    } catch (e) {
+      console.warn(`✗ ${cfg.code} ${cfg.name} 失败：${e.message}`);
+      etfs.push({ ...cfg, pe: null, pb: null, pePct: null, dy: null, valDate: null, history: [], error: e.message });
+    }
+    await sleep(400);
+  }
+
+  const now = new Date();
   const payload = {
-    generatedAt: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
-    model: 'composite-percentile-v1',
-    source: '蛋卷基金指数估值（danjuanfunds.com）',
-    indices,
+    generatedAt: now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
+    generatedAtISO: now.toISOString(),
+    model: 'pe-percentile-5y-v1',
+    source: '东方财富行情 · 蛋卷基金估值 · 中证指数官网',
+    etfs,
   };
 
-  const js = `/* 自动生成，勿手改；重新生成请运行 node tools/fetch-data.mjs */\nwindow.VALUATION_DATA = ${JSON.stringify(payload, null, 2)};\n`;
+  const js =
+    '/* 自动生成，勿手改；重新生成：node fetch-data.mjs */\n' +
+    `window.ETF_DATA = ${JSON.stringify(payload, null, 2)};\n`;
   writeFileSync(OUT, js, 'utf8');
   console.log(`\n已写入 ${OUT}（${(Buffer.byteLength(js) / 1024).toFixed(1)} KB）`);
-};
+}
 
 main().catch((e) => {
   console.error('生成失败：', e);

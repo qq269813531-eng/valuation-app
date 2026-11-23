@@ -1,23 +1,21 @@
-/* ETF 温度计 —— 盘中行情 + 估值分位 + 定投分配
+/* ETF 温度计 —— 盘中行情 + 估值分位 + 买卖建议
    数据：data.js（Actions 每日生成） + 东财实时行情（浏览器直连） */
 (function () {
   'use strict';
 
   var DATA = (typeof window !== 'undefined' && window.ETF_DATA) || {};
   var ETFS = Array.isArray(DATA.etfs) ? DATA.etfs : [];
-  var LS_BUDGET = 'etf_app_budget_v1';
-
+  
   var LEVELS = [
     { cls: 'lv-cheap', label: '便宜', action: '可加仓', mult: 1.5, desc: '估值处于近 5 年低位，值得多买' },
     { cls: 'lv-low',   label: '偏低', action: '正常买', mult: 1.2, desc: '估值低于历史中位，可以正常买' },
-    { cls: 'lv-fair',  label: '适中', action: '按计划定投', mult: 1.0, desc: '估值在中位附近，按计划定投' },
+    { cls: 'lv-fair',  label: '适中', action: '正常买入', mult: 1.0, desc: '估值在中位附近，正常买入' },
     { cls: 'lv-warm',  label: '偏高', action: '少买', mult: 0.6, desc: '估值已高于历史中位，减少买入' },
     { cls: 'lv-rich',  label: '偏贵', action: '暂停买入', mult: 0.2, desc: '估值处于近 5 年高位，暂停买入等回落' }
   ];
 
   var state = {
     quotes: {},       // code -> { price, changePct, time, digits }
-    budget: 3000,
     view: 'home',
     openCode: null,
     lastUpdate: null,
@@ -129,9 +127,13 @@
       : ((price != null && iopv) ? (price / iopv - 1) * 100 : null);
     var base = levelOf(etf.pePct);
     var level = adjustLevel(base, premium);
+    // 股息率 = 该 ETF 近 12 个月实际每份分红 ÷ 现价（分红金额由 fetch-data.mjs 烤进 ttmDiv）
+    var dy = (etf.ttmDiv != null && price)
+      ? (etf.ttmDiv / price) * 100
+      : etf.dy;
     return {
       etf: etf, price: price, chg: chg, ts: ts, iopv: iopv, premium: premium,
-      base: base, level: level, digits: 3
+      base: base, level: level, digits: 3, dy: dy
     };
   }
 
@@ -140,11 +142,7 @@
     if (m.premium != null && m.premium > 2 && m.level !== m.base) {
       return '场内溢价 ' + num(m.premium, 1) + '%，等溢价收敛再买';
     }
-    var t = L.desc;
-    if (m.etf.purchase && m.etf.purchase.indexOf('暂停') >= 0 && m.level >= 3) {
-      t += '，且暂停申购';
-    }
-    return t;
+    return L.desc;
   }
 
   /* ---------------- 图形 ---------------- */
@@ -230,12 +228,11 @@
     var prem = m.premium == null ? null : m.premium;
     var premCls = prem == null ? 'is-na' : (prem > 2 ? 'is-up' : (prem < -0.3 ? 'is-down' : ''));
     var tag = e.market === 'US' ? 'QDII · 美股' : (e.market === 'HK' ? 'QDII · 港股' : 'A股');
-    var paused = e.purchase && e.purchase.indexOf('暂停') >= 0;
     return '<article class="etf ' + L.cls + '" data-code="' + esc(e.code) + '" role="button" tabindex="0">' +
       '<div class="etf__top">' +
         '<div><h3 class="etf__name">' + esc(e.name) + '</h3>' +
         '<p class="etf__sub">' + esc(e.code) + ' · ' + esc(e.indexName) + ' ' + esc(e.indexCode) + '</p></div>' +
-        '<span class="etf__tag' + (paused ? ' is-warn' : '') + '">' + (paused ? '暂停申购' : tag) + '</span>' +
+        '<span class="etf__tag">' + tag + '</span>' +
       '</div>' +
       '<div class="etf__priceRow">' +
         '<strong class="etf__price">' + num(m.price, m.digits) + '</strong>' +
@@ -244,7 +241,7 @@
       '</div>' +
       '<div class="etf__stats">' +
         '<div class="etf__stat"><i>PE 分位</i><b>' + (e.pePct == null ? '--' : num(e.pePct, 1) + '%') + '</b></div>' +
-        '<div class="etf__stat"><i>股息率</i><b' + (e.dy == null ? ' class="is-na"' : '') + '>' + (e.dy == null ? '--' : num(e.dy, 2) + '%') + '</b></div>' +
+        '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null ? ' class="is-na"' : '') + '>' + (m.dy == null ? '--' : num(m.dy, 2) + '%') + '</b></div>' +
         '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '--' : signed(prem, 1)) + '</b></div>' +
       '</div>' +
       tempBar(e.pePct) +
@@ -268,21 +265,21 @@
   function renderHome() {
     var ms = ETFS.map(model);
     var counts = [0, 0, 0, 0, 0];
-    ms.forEach(function (m) { counts[m.base]++; });
+    ms.forEach(function (m) { counts[m.level]++; });
     var names = { 0: '便宜', 1: '偏低', 2: '适中', 3: '偏高', 4: '偏贵' };
     var parts = [];
     for (var i = 0; i < 5; i++) if (counts[i]) parts.push(counts[i] + ' 只' + names[i]);
-    var text = '按估值分位：' + (parts.length ? parts.join('、') : '数据加载中') + '。';
-    var highPrem = ms.filter(function (m) { return m.premium != null && m.premium > 2; });
-    if (highPrem.length) {
-      text += '但 ' +
-        highPrem.map(function (m) { return m.etf.name + '（溢价 ' + signed(m.premium, 1) + '）'; }).join('、') +
-        ' 场内价明显高于净值，已按「偏贵」处理——同样的资产要多付钱，先别追高。';
+    var text = '按分位与溢价：' + (parts.length ? parts.join('、') : '数据加载中') + '。';
+    var downgraded = ms.filter(function (m) { return m.level > m.base && m.premium != null && m.premium > 2; });
+    if (downgraded.length) {
+      text += '其中' +
+        downgraded.map(function (m) { return m.etf.name + '（溢价 ' + signed(m.premium, 1) + '）'; }).join('、') +
+        ' 场内价明显高于净值，已降档处理——同样的资产要多付钱，先别追高。';
     } else {
       var cheap = ms.filter(function (m) { return m.level <= 1; });
       text += cheap.length
         ? '溢价正常，' + cheap.map(function (m) { return m.etf.name; }).join('、') + ' 可以多买一点。'
-        : '溢价正常，按档位买就行。';
+        : '溢价正常，按档位看就行。';
     }
 
     var st = sessionState();
@@ -302,54 +299,6 @@
       ' · 估值 ' + (genTs ? md(genTs) : '--');
   }
 
-  /* ---------------- 定投 ---------------- */
-
-  function readBudget() {
-    var v = Number(localStorage.getItem(LS_BUDGET));
-    return isFinite(v) && v > 0 ? v : 3000;
-  }
-
-  function renderPlan() {
-    var budget = state.budget;
-    var base = budget / (ETFS.length || 1);
-    var rows = ETFS.map(function (e) {
-      var m = model(e);
-      var L = LEVELS[m.level];
-      var amt = Math.round((base * L.mult) / 10) * 10;
-      return { m: m, L: L, amt: amt };
-    });
-    var sum = rows.reduce(function (a, r) { return a + r.amt; }, 0);
-    var cash = budget - sum;
-
-    $('#allocList').innerHTML = rows.map(function (r) {
-      return '<div class="alloc">' +
-        '<div class="alloc__l"><div class="alloc__name">' + esc(r.m.etf.name) + ' ' + esc(r.m.etf.code) + '</div>' +
-        '<div class="alloc__sub">' + r.L.label + ' · ' + r.L.mult.toFixed(1) + ' 倍' +
-        (r.m.premium != null && r.m.premium > 2 ? ' · 溢价 ' + num(r.m.premium, 1) + '% 已降档' : '') + '</div></div>' +
-        '<div class="alloc__amt' + (r.amt === 0 ? ' is-zero' : '') + '">' + money(r.amt) + '</div>' +
-        '</div>';
-    }).join('');
-
-    $('#allocTotal').innerHTML = '<span>合计买入</span><b>' + money(sum) + '</b>';
-    $('#allocPos').textContent = cash > 0
-      ? '本次留现金 ' + money(cash) + '（估值都偏高时多留一点，等回落再加）。分配按分位档位加权，仅供参考。'
-      : '按当前档位已把预算分完。分配按分位档位加权，仅供参考。';
-
-    var input = $('#budgetInput');
-    if (input && Number(input.value) !== budget) input.value = String(budget);
-  }
-
-  function setBudget(v) {
-    v = Math.max(0, Math.round(Number(v) || 0));
-    state.budget = v;
-    localStorage.setItem(LS_BUDGET, String(v));
-    var chips = document.querySelectorAll('#budgetChips .chip');
-    for (var i = 0; i < chips.length; i++) {
-      chips[i].classList.toggle('is-on', Number(chips[i].getAttribute('data-amount')) === v);
-    }
-    renderPlan();
-  }
-
   /* ---------------- 数据页 ---------------- */
 
   function renderData() {
@@ -359,7 +308,7 @@
         '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
         'PE <b>' + num(e.pe, 2) + '</b>',
         'PB <b>' + num(e.pb, 2) + '</b>',
-        '股息率 <b>' + (e.dy == null ? '--' : num(e.dy, 2) + '%') + '</b>',
+        '股息率 <b>' + (m.dy == null ? '--' : num(m.dy, 2) + '%') + '</b>',
         '分位 <b>' + (e.pePct == null ? '--' : num(e.pePct, 1) + '%') + '</b>',
         '估值日 ' + esc((e.valDate || '--').slice(5))
       ].map(function (s) { return '<span class="datarow__bit">' + s + '</span>'; });
@@ -376,7 +325,7 @@
     $('#dataUpdated').textContent = DATA.generatedAt || '';
     $('#dataStatusText').textContent =
       '数据源：' + (DATA.source || '--') + '。行情、IOPV 由浏览器直连腾讯财经，估值与净值每日早上由 GitHub Actions 重新生成；' +
-      '513530 跟踪的中证港股通高股息指数没有免费 PB 与股息率口径，相关字段显示「--」。';
+      '股息率按这只 ETF 近 12 个月的实际分红 ÷ 现价计算，不分红的 ETF 显示 0.00%；513530 跟踪的港股通高股息指数没有免费 PB 口径，PB 显示「--」。';
   }
 
   /* ---------------- 说明页 ---------------- */
@@ -386,12 +335,10 @@
       '<h3>四个指标</h3>' +
       '<p><b>价格</b>：ETF 场内成交价，交易日 9:15–11:30、13:00–15:00 每 20 秒刷新一次。</p>' +
       '<p><b>PE 分位</b>：当前市盈率在过去 5 年里的位置，0% 最便宜、100% 最贵。分位低只说明「相对自己便宜」，不代表绝对安全。</p>' +
-      '<p><b>股息率</b>：指数近一年分红 ÷ 指数点位，来自蛋卷基金。513530 的港股通高股息指数暂无免费口径，显示「--」。</p>' +
+      '<p><b>股息率</b>：这只 ETF 近 12 个月实际每份分红合计 ÷ 现价，不是指数的估算股息率。分红记录来自天天基金「分红送配」，没有分红的 ETF 显示 0.00%。</p>' +
       '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。</p>' +
       '<h3>买入建议怎么来的</h3>' +
-      '<p>只看分位：&lt;20% 便宜、20–40% 偏低、40–60% 适中、60–80% 偏高、≥80% 偏贵。溢价超过 2% 降一档，超过 5% 直接归为「偏贵 · 暂停买入」——QDII 尤其要防这一点。</p>' +
-      '<h3>定投分配</h3>' +
-      '<p>预算平均分成 5 份，再按档位加权：便宜 ×1.5、偏低 ×1.2、适中 ×1.0、偏高 ×0.6、偏贵 ×0.2。分不完的钱留现金。</p>' +
+      '<p>只看分位：&lt;20% 便宜、20–40% 偏低、40–60% 适中、60–80% 偏高、≥80% 偏贵。溢价超过 2% 降一档，超过 5% 直接归为「偏贵 · 暂停买入」——QDII 尤其要防这一点。首页那行汇总用的也是降档后的结果。</p>' +
       '<h3>数据与更新</h3>' +
       '<p>估值、净值、股息率每天由 GitHub Actions 跑 <code>node fetch-data.mjs</code> 写进 <code>data.js</code>；行情是浏览器实时拉的。想手动更新，在仓库里跑 <code>node fetch-data.mjs</code> 再提交即可。</p>' +
       '<p><b>装到桌面</b>：iPhone 用 Safari 打开后点「分享」→「添加到主屏幕」；安卓和电脑 Chrome 用地址栏右侧的安装图标。装好后从图标进入，全屏显示，最近一次数据离线也能看。</p>' +
@@ -408,10 +355,10 @@
       ['场内溢价', signed(m.premium, 2)],
       ['PE', num(e.pe, 2)],
       ['PB', num(e.pb, 2)],
-      ['股息率', e.dy == null ? '--' : num(e.dy, 2) + '%'],
+      ['股息率', m.dy == null ? '--' : num(m.dy, 2) + '%'],
+      ['近 12 月分红', e.ttmDiv == null ? '--' : num(e.ttmDiv, 4) + ' 元/份'],
       ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')],
-      ['估值日', e.valDate || '--'],
-      ['申购状态', e.purchase || '--']
+      ['估值日', e.valDate || '--']
     ].map(function (row) {
       return '<div class="kv__row"><span class="kv__k">' + row[0] + '</span><span class="kv__v">' + esc(row[1]) + '</span></div>';
     }).join('');
@@ -616,7 +563,6 @@
 
   function renderActive() {
     if (state.view === 'home') renderHome();
-    else if (state.view === 'plan') renderPlan();
     else if (state.view === 'data') renderData();
     if (state.openCode) {
       var etf = null;
@@ -643,7 +589,6 @@
     var tabs = document.querySelectorAll('#tabbar .tab');
     for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('is-active', tabs[j].getAttribute('data-view') === name);
     if (name === 'home') renderHome();
-    else if (name === 'plan') renderPlan();
     else if (name === 'data') renderData();
     else if (name === 'about') renderAbout();
     window.scrollTo(0, 0);
@@ -696,24 +641,16 @@
       });
     });
 
-    $('#budgetChips').addEventListener('click', function (ev) {
-      var chip = ev.target.closest ? ev.target.closest('.chip') : null;
-      if (chip) setBudget(chip.getAttribute('data-amount'));
-    });
-
-    $('#budgetInput').addEventListener('input', function () {
-      var v = Number(this.value);
-      if (isFinite(v) && v >= 0) {
-        state.budget = v;
-        localStorage.setItem(LS_BUDGET, String(v));
-        renderPlan();
-      }
-    });
   }
 
   /* ---------------- 启动 ---------------- */
 
   function boot() {
+    if (!ETFS.length) {
+      var g = $('#cardGrid');
+      if (g) g.innerHTML = '<div class="etf" style="padding:20px"><b>数据文件版本不对</b><p class="etf__adv" style="margin-top:8px">页面需要新版 data.js（内含 ETF_DATA），请重新上传仓库根目录的 data.js 后刷新。</p></div>';
+      return;
+    }
     ETFS.forEach(function (e) {
       state.quotes[e.code] = {
         price: e.price, changePct: e.changePct,
@@ -721,10 +658,8 @@
         digits: Math.max(2, Math.min(3, dig(e.price) || 3))
       };
     });
-    state.budget = readBudget();
     bind();
     switchView('home');
-    setBudget(state.budget);
     renderData();
     renderAbout();
 

@@ -1,5 +1,7 @@
-﻿/* ETF 温度计 · Service Worker */
-const CACHE = 'etf-temp-v6';
+﻿/* ETF 温度计 · Service Worker
+   策略：联网优先。有网就拿最新文件，没网才用缓存里那份。
+   这样改了代码刷新就能看到，不用清缓存。 */
+const CACHE = 'etf-temp-v8';
 const ASSETS = [
   './',
   './index.html',
@@ -30,36 +32,18 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return; // 东财行情不拦截
+  if (url.origin !== self.location.origin) return; // 腾讯行情等第三方不拦截
 
-  // data.js 每天更新：先走网络，失败再用缓存
-  if (url.pathname.endsWith('/data.js')) {
-    event.respondWith(
-      fetch(req)
-        .then((res) => {
+  event.respondWith(
+    fetch(req)
+      .then((res) => {
+        if (res && res.status === 200) {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put(req, copy));
-          return res;
-        })
-        .catch(() => caches.match(req))
-    );
-    return;
-  }
-
-  // 其余静态资源：缓存优先，后台顺带更新
-  event.respondWith(
-    caches.match(req).then((hit) => {
-      const network = fetch(req)
-        .then((res) => {
-          if (res && res.status === 200) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => hit);
-      return hit || network;
-    })
+        }
+        return res;
+      })
+      .catch(() => caches.match(req).then((hit) => hit || caches.match('./index.html')))
   );
 });
 
