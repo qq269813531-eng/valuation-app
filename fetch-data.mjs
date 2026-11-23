@@ -172,8 +172,8 @@ async function dyPercentile(secid, records) {
   }).filter((x) => x.dy != null);
   if (!series.length) throw new Error('无分红，无法算股息率分位');
   const last = series[series.length - 1].dy;
-  // 用 P10–P90 当刻度：分红是滚动 12 个月加总，分红笔数变化会造成假峰假谷，
-  // 直接拿 min/max 会被这些极端值带偏，所以把两端各切掉 10% 再拉成 0–100。
+  // 用 P25–P75 当刻度：分红是滚动 12 个月加总，分红笔数变化会造成假峰假谷，
+  // 直接拿 min/max 会被这些极端值带偏，所以只保留中间 50% 再拉成 0–100。
   const vals = series.map((s) => s.dy).sort((a, b) => a - b);
   const q = (p) => {
     const idx = (vals.length - 1) * p;
@@ -181,15 +181,15 @@ async function dyPercentile(secid, records) {
     const hi = Math.ceil(idx);
     return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo);
   };
-  const p10 = q(0.1);
-  const p90 = q(0.9);
-  const span = p90 - p10 || 1;
-  const pct = Math.max(0, Math.min(100, ((last - p10) / span) * 100));
+  const lo = q(0.25);
+  const hi = q(0.75);
+  const span = hi - lo || 1;
+  const pct = Math.max(0, Math.min(100, ((last - lo) / span) * 100));
   return {
     dyPct: round(pct, 1),
     dyNow: round(last, 2),
-    dyLow: round(p10, 2),
-    dyHigh: round(p90, 2),
+    dyLow: round(lo, 2),
+    dyHigh: round(hi, 2),
     dyMin: round(vals[0], 2),
     dyMax: round(vals[vals.length - 1], 2),
   };
