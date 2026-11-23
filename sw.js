@@ -1,8 +1,5 @@
-/* 简易离线缓存 Service Worker
- * 策略：先读缓存（秒开），同时后台静默更新，下次打开即为最新。
- * 仅在 https 或 localhost 下才会注册（file:// 直接打开时不注册，不影响使用）。
- */
-const CACHE = 'valuation-app-v1';
+﻿/* ETF 温度计 · Service Worker */
+const CACHE = 'etf-temp-v6';
 const ASSETS = [
   './',
   './index.html',
@@ -14,43 +11,58 @@ const ASSETS = [
   './icon-512.png'
 ];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE)
-      .then((c) => c.addAll(ASSETS))
-      .catch(() => {})
-      .then(() => self.skipWaiting())
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
   );
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener('fetch', (e) => {
-  const req = e.request;
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
   if (req.method !== 'GET') return;
+
   const url = new URL(req.url);
-  if (url.origin !== location.origin) return; // 只接管本站资源
-  e.respondWith(
-    caches.match(req).then((hit) => {
-      const network = fetch(req).then((res) => {
-        if (res && res.ok) {
+  if (url.origin !== self.location.origin) return; // 东财行情不拦截
+
+  // data.js 每天更新：先走网络，失败再用缓存
+  if (url.pathname.endsWith('/data.js')) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        }
-        return res;
-      }).catch(() => hit);
+          caches.open(CACHE).then((c) => c.put(req, copy));
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // 其余静态资源：缓存优先，后台顺带更新
+  event.respondWith(
+    caches.match(req).then((hit) => {
+      const network = fetch(req)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy));
+          }
+          return res;
+        })
+        .catch(() => hit);
       return hit || network;
     })
   );
 });
 
-// 允许页面发消息强制更新（数据页「立即检查更新」按钮）
-self.addEventListener('message', (e) => {
-  if (e.data === 'skip-waiting') self.skipWaiting();
+self.addEventListener('message', (event) => {
+  if (event.data === 'skip-waiting') self.skipWaiting();
 });

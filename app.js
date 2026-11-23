@@ -1,704 +1,745 @@
-/* ==========================================================
-   估值温度计 · 应用逻辑
-   ----------------------------------------------------------
-   数据：window.VALUATION_DATA（由 data.js 提供）
-   模型：综合分位 = Σ(指标分位 × 权重) / Σ权重
-        分位越低越便宜 → 买入倍数越高
-   ========================================================== */
+/* ETF 温度计 —— 盘中行情 + 估值分位 + 定投分配
+   数据：data.js（Actions 每日生成） + 东财实时行情（浏览器直连） */
 (function () {
   'use strict';
 
-  var DATA = window.VALUATION_DATA || { indices: [] };
-  var LS_MANUAL = 'divapp.manual.v1';
-  var LS_BUDGET = 'divapp.budget.v1';
+  var DATA = (typeof window !== 'undefined' && window.ETF_DATA) || {};
+  var ETFS = Array.isArray(DATA.etfs) ? DATA.etfs : [];
+  var LS_BUDGET = 'etf_app_budget_v1';
 
-  /* ---------------- 判定档位 ---------------- */
-  // max: 分位上限（含）；mult: 定投倍数；cls: 徽标样式；color: 颜色
-  var SIGNALS = [
-    { min: 0, max: 20, key: 'cheap', label: '低估 · 加码', mult: 2.0, cls: 'pill--cheap', color: 'var(--cheap)', advice: '历史低位，定投翻倍，可分批建仓' },
-    { min: 20, max: 35, key: 'cheap2', label: '偏低 · 多买', mult: 1.5, cls: 'pill--cheap2', color: 'var(--cheap-2)', advice: '低于中枢，1.5 倍定投' },
-    { min: 35, max: 55, key: 'fair', label: '合理 · 定投', mult: 1.0, cls: 'pill--fair', color: 'var(--fair)', advice: '中枢附近，按计划正常买入' },
-    { min: 55, max: 70, key: 'warm', label: '偏高 · 少买', mult: 0.6, cls: 'pill--warm', color: 'var(--warm)', advice: '已偏离中枢，减少新增买入' },
-    { min: 70, max: 85, key: 'rich', label: '高估 · 暂停', mult: 0.2, cls: 'pill--rich', color: 'var(--rich)', advice: '明显偏贵，暂停新增，只留定投零头' },
-    { min: 85, max: 100, key: 'vrich', label: '极高 · 止盈', mult: 0, cls: 'pill--very-rich', color: 'var(--very-rich)', advice: '历史高位，停止买入并考虑分批止盈' }
+  var LEVELS = [
+    { cls: 'lv-cheap', label: '便宜', action: '可加仓', mult: 1.5, desc: '估值处于近 5 年低位，值得多买' },
+    { cls: 'lv-low',   label: '偏低', action: '正常买', mult: 1.2, desc: '估值低于历史中位，可以正常买' },
+    { cls: 'lv-fair',  label: '适中', action: '按计划定投', mult: 1.0, desc: '估值在中位附近，按计划定投' },
+    { cls: 'lv-warm',  label: '偏高', action: '少买', mult: 0.6, desc: '估值已高于历史中位，减少买入' },
+    { cls: 'lv-rich',  label: '偏贵', action: '暂停买入', mult: 0.2, desc: '估值处于近 5 年高位，暂停买入等回落' }
   ];
-
-  // 股息率 → 分位 对照（绝对水平映射，非历史分位；可在 APP 内填真实分位覆盖）
-  var DY_ANCHORS = [
-    [1.0, 97], [1.5, 90], [2.0, 80], [2.5, 68], [3.0, 55],
-    [3.5, 42], [4.0, 28], [4.5, 15], [5.0, 6], [5.5, 3], [6.5, 1]
-  ];
-
-  /* ==========================================================
-     纯函数（不依赖 DOM，可在 Node 里单测）
-     ========================================================== */
-
-  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-
-  /** 经验刻度通用换算：anchors = [[数值, 分位], ...] 升序，数值越大分位越小 */
-  function anchorToPct(anchors, v) {
-    if (v == null || isNaN(v) || !anchors || !anchors.length) return null;
-    if (v <= anchors[0][0]) return anchors[0][1];
-    var last = anchors[anchors.length - 1];
-    if (v >= last[0]) return last[1];
-    for (var i = 1; i < anchors.length; i++) {
-      var a = anchors[i - 1], b = anchors[i];
-      if (v <= b[0]) {
-        var t = (v - a[0]) / (b[0] - a[0]);
-        return a[1] + t * (b[1] - a[1]);
-      }
-    }
-    return null;
-  }
-
-  /** 股息率 → 估值分位（越高越便宜 → 分位越低） */
-  function dyToPct(dy) { return anchorToPct(DY_ANCHORS, dy); }
-
-  function signalOf(p) {
-    for (var i = 0; i < SIGNALS.length; i++) if (p <= SIGNALS[i].max) return SIGNALS[i];
-    return SIGNALS[SIGNALS.length - 1];
-  }
-
-  /** 由历史序列估当前值的历史分位（0~100） */
-  function pctFromSeries(values, cur) {
-    if (!values || values.length < 10 || cur == null) return null;
-    var n = 0;
-    for (var i = 0; i < values.length; i++) if (values[i] < cur) n++;
-    return (n / values.length) * 100;
-  }
-
-  /** 合并「接口数据 + 手动录入」 */
-  function resolve(idx, manualMap) {
-    var m = (manualMap && manualMap[idx.id]) || {};
-    var pick = function (k) {
-      return m[k] != null && m[k] !== '' && !isNaN(m[k]) ? Number(m[k]) : (idx[k] == null ? null : idx[k]);
-    };
-    var r = {
-      pe: pick('pe'), pb: pick('pb'),
-      pePct: pick('pePct'), pbPct: pick('pbPct'),
-      dy: pick('dy'), dyPct: m.dyPct != null && m.dyPct !== '' ? Number(m.dyPct) : null,
-      date: m.date || idx.date || null,
-      isManual: !!(manualMap && manualMap[idx.id] && Object.keys(manualMap[idx.id]).length),
-      pending: !!idx.pending && !(manualMap && manualMap[idx.id]),
-      pePctDerived: false
-    };
-
-    // 手动只填了 PE、没填分位 → 先用自带 5 年序列估算；序列为空（如港股通高股息）则用经验刻度
-    if (r.pePct == null && r.pe != null) {
-      var est = null;
-      if (idx.history && idx.history.length > 20) {
-        est = pctFromSeries(idx.history.map(function (p) { return p[1]; }), r.pe);
-      }
-      if (est == null && idx.fallbackPeAnchors) est = anchorToPct(idx.fallbackPeAnchors, r.pe);
-      if (est != null) { r.pePct = est; r.pePctDerived = true; }
-    }
-    return r;
-  }
-
-  /** 计算综合分位与档位 */
-  function scoreOf(idx, manualMap) {
-    var v = resolve(idx, manualMap);
-    var w = idx.weights || { pe: 0.6, pb: 0.4 };
-    var parts = [];
-
-    if (v.pePct != null) {
-      parts.push({ key: 'pe', label: '市盈率 PE', weight: w.pe || 0, pct: clamp(v.pePct, 0, 100), value: v.pe, unit: '', derived: v.pePctDerived });
-    }
-    if (v.pbPct != null && w.pb) {
-      parts.push({ key: 'pb', label: '市净率 PB', weight: w.pb, pct: clamp(v.pbPct, 0, 100), value: v.pb, unit: '', derived: false });
-    }
-    var dyP = v.dyPct != null ? v.dyPct : (v.dy != null ? dyToPct(v.dy) : null);
-    if (dyP != null && w.dy) {
-      parts.push({ key: 'dy', label: '股息率', weight: w.dy, pct: clamp(dyP, 0, 100), value: v.dy, unit: '%', derived: v.dyPct == null });
-    }
-
-    var sw = parts.reduce(function (s, p) { return s + p.weight; }, 0);
-    var p = sw > 0 ? parts.reduce(function (s, x) { return s + x.pct * x.weight; }, 0) / sw : null;
-    var full = (w.pe || 0) + (w.pb || 0) + (w.dy || 0);
-
-    return {
-      v: v, parts: parts, p: p,
-      signal: p == null ? null : signalOf(p),
-      ready: p != null,
-      coverage: full > 0 ? sw / full : 0
-    };
-  }
-
-  /* ---------------- 存储 ---------------- */
-  function loadJSON(key, fallback) {
-    try {
-      var raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch (e) { return fallback; }
-  }
-  function saveJSON(key, val) {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* 隐私模式忽略 */ }
-  }
 
   var state = {
+    quotes: {},       // code -> { price, changePct, time, digits }
+    budget: 3000,
     view: 'home',
-    budget: Number(loadJSON(LS_BUDGET, 3000)) || 3000,
-    manual: loadJSON(LS_MANUAL, {}) || {},
-    detailId: null
+    openCode: null,
+    lastUpdate: null,
+    timer: null
   };
 
-  /* ==========================================================
-     DOM 相关
-     ========================================================== */
-  var $ = function (sel) { return document.querySelector(sel); };
-  var $$ = function (sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); };
+  /* ---------------- 小工具 ---------------- */
 
+  function $(sel, root) { return (root || document).querySelector(sel); }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
-  function num(v, d) { return v == null || isNaN(v) ? '--' : Number(v).toFixed(d == null ? 2 : d); }
-  function money(v) {
-    if (v == null) return '--';
-    if (v >= 10000) return (v / 10000).toFixed(2).replace(/\.?0+$/, '') + ' 万';
-    return Math.round(v).toLocaleString('zh-CN');
+  function num(v, d) {
+    if (v == null || !isFinite(v)) return '--';
+    return Number(v).toFixed(d == null ? 2 : d);
   }
-  function fmtDate(s) { return s ? String(s).slice(0, 10) : '--'; }
+  function signed(v, d) {
+    if (v == null || !isFinite(v)) return '--';
+    return (v > 0 ? '+' : '') + Number(v).toFixed(d == null ? 2 : d) + '%';
+  }
+  function dig(v) {
+    var s = String(v), i = s.indexOf('.');
+    if (i < 0) return 0;
+    return Math.min(3, s.length - i - 1);
+  }
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+  function hm(ts) {
+    if (!ts) return '--';
+    var d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+  function md(ts) {
+    if (!ts) return '--';
+    var d = new Date(ts);
+    return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+  function ym(ts) { var d = new Date(ts); return d.getFullYear() + '-' + pad2(d.getMonth() + 1); }
+  function money(v) {
+    if (v == null || !isFinite(v)) return '--';
+    return '¥' + Math.round(v).toLocaleString('zh-CN');
+  }
+
+  /* ---------------- 交易时段 ---------------- */
+
+  function sessionState(d) {
+    var now = d || new Date();
+    var wd = now.getDay();
+    if (wd === 0 || wd === 6) return 'closed';
+    var m = now.getHours() * 60 + now.getMinutes();
+    if (m >= 555 && m < 690) return 'open';   // 9:15 - 11:30
+    if (m >= 780 && m < 900) return 'open';   // 13:00 - 15:00
+    if (m >= 690 && m < 780) return 'break';  // 午休
+    return 'closed';
+  }
+
+  function nextOpenDelay(now) {
+    var base = now || new Date();
+    var best = null;
+    for (var i = 0; i < 8; i++) {
+      var d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+      if (d.getDay() === 0 || d.getDay() === 6) continue;
+      var cands = [
+        new Date(d.getFullYear(), d.getMonth(), d.getDate(), 9, 15, 0),
+        new Date(d.getFullYear(), d.getMonth(), d.getDate(), 13, 0, 0)
+      ];
+      for (var k = 0; k < cands.length; k++) {
+        if (cands[k] > base && (!best || cands[k] < best)) best = cands[k];
+      }
+    }
+    if (!best) return 3600e3;
+    return Math.min(best - base, 1800e3);
+  }
+
+  /* ---------------- 估值模型 ---------------- */
+
+  function levelOf(pct) {
+    if (pct == null || !isFinite(pct)) return 2;
+    if (pct < 20) return 0;
+    if (pct < 40) return 1;
+    if (pct < 60) return 2;
+    if (pct < 80) return 3;
+    return 4;
+  }
+
+  function adjustLevel(lv, premium) {
+    if (premium == null || !isFinite(premium)) return lv;
+    if (premium > 5) return 4;
+    if (premium > 2) return Math.min(4, lv + 1);
+    return lv;
+  }
+
+  function quoteOf(code) { return state.quotes[code]; }
+
+  function iopvOf(etf, q) {
+    if (q && q.iopv) return q.iopv;
+    if (etf.iopvMode === 'fair') return etf.fairNav;
+    return etf.nav;
+  }
+
+  function model(etf) {
+    var q = quoteOf(etf.code) || {};
+    var price = q.price != null ? q.price : etf.price;
+    var chg = q.changePct != null ? q.changePct : etf.changePct;
+    var ts = q.time != null ? q.time : (etf.quoteTime ? Date.parse(etf.quoteTime) : null);
+    var iopv = iopvOf(etf, q);
+    var premium = q.premium != null ? q.premium
+      : ((price != null && iopv) ? (price / iopv - 1) * 100 : null);
+    var base = levelOf(etf.pePct);
+    var level = adjustLevel(base, premium);
+    return {
+      etf: etf, price: price, chg: chg, ts: ts, iopv: iopv, premium: premium,
+      base: base, level: level, digits: 3
+    };
+  }
+
+  function adviceOf(m) {
+    var L = LEVELS[m.level];
+    if (m.premium != null && m.premium > 2 && m.level !== m.base) {
+      return '场内溢价 ' + num(m.premium, 1) + '%，等溢价收敛再买';
+    }
+    var t = L.desc;
+    if (m.etf.purchase && m.etf.purchase.indexOf('暂停') >= 0 && m.level >= 3) {
+      t += '，且暂停申购';
+    }
+    return t;
+  }
+
+  /* ---------------- 图形 ---------------- */
+
+  function sparkSVG(hist, color) {
+    var pts = (hist || []).filter(function (p) { return p && p.length === 2 && isFinite(p[1]); }).slice(-260);
+    if (pts.length < 3) return '';
+    var W = 300, H = 40;
+    var xs = pts.map(function (p) { return p[0]; });
+    var ys = pts.map(function (p) { return p[1]; });
+    var x0 = xs[0], x1 = xs[xs.length - 1];
+    var y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
+    var sx = function (v) { return 2 + ((v - x0) / (x1 - x0 || 1)) * (W - 4); };
+    var sy = function (v) { return H - 4 - ((v - y0) / (y1 - y0)) * (H - 8); };
+    var d = pts.map(function (p, i) {
+      return (i ? 'L' : 'M') + sx(p[0]).toFixed(1) + ',' + sy(p[1]).toFixed(1);
+    }).join(' ');
+    var area = d + ' L' + sx(x1).toFixed(1) + ',' + H + ' L' + sx(x0).toFixed(1) + ',' + H + ' Z';
+    var last = pts[pts.length - 1];
+    return '<svg class="etf__spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+      '<path d="' + area + '" fill="' + color + '" opacity="0.10"></path>' +
+      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<circle cx="' + sx(last[0]).toFixed(1) + '" cy="' + sy(last[1]).toFixed(1) + '" r="2.4" fill="' + color + '"></circle>' +
+      '</svg>';
+  }
+
+  function chartSVG(hist, color) {
+    var pts = (hist || []).filter(function (p) { return p && p.length === 2 && isFinite(p[1]); }).slice(-260);
+    if (pts.length < 3) return '<p class="fine">暂无估值曲线</p>';
+    var W = 320, H = 160, PL = 30, PR = 10, PT = 12, PB = 20;
+    var xs = pts.map(function (p) { return p[0]; });
+    var ys = pts.map(function (p) { return p[1]; });
+    var x0 = xs[0], x1 = xs[xs.length - 1];
+    var y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    var pad = (y1 - y0) * 0.1 || 1;
+    var lo = y0 - pad, hi = y1 + pad;
+    var sx = function (v) { return PL + ((v - x0) / (x1 - x0 || 1)) * (W - PL - PR); };
+    var sy = function (v) { return PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB); };
+    var d = pts.map(function (p, i) {
+      return (i ? 'L' : 'M') + sx(p[0]).toFixed(1) + ',' + sy(p[1]).toFixed(1);
+    }).join(' ');
+    var area = d + ' L' + sx(x1).toFixed(1) + ',' + (H - PB) + ' L' + sx(x0).toFixed(1) + ',' + (H - PB) + ' Z';
+    var rows = [hi, (lo + hi) / 2, lo].map(function (v) {
+      return '<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + sy(v).toFixed(1) + '" y2="' + sy(v).toFixed(1) +
+        '" stroke="currentColor" stroke-opacity="0.12" stroke-width="1" stroke-dasharray="3 4"></line>' +
+        '<text x="' + (PL - 4) + '" y="' + (sy(v) + 3).toFixed(1) + '" text-anchor="end" font-size="8" fill="currentColor" fill-opacity="0.55">' +
+        num(v, v >= 100 ? 0 : 1) + '</text>';
+    }).join('');
+    var last = pts[pts.length - 1];
+    var xa = ym(x0), xb = ym(x1);
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="auto" role="img">' + rows +
+      '<path d="' + area + '" fill="' + color + '" opacity="0.10"></path>' +
+      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<circle cx="' + sx(last[0]).toFixed(1) + '" cy="' + sy(last[1]).toFixed(1) + '" r="3" fill="' + color + '"></circle>' +
+      '<text x="' + PL + '" y="' + (H - 6) + '" font-size="8" fill="currentColor" fill-opacity="0.55">' + xa + '</text>' +
+      '<text x="' + (W - PR) + '" y="' + (H - 6) + '" text-anchor="end" font-size="8" fill="currentColor" fill-opacity="0.55">' + xb + '</text>' +
+      '</svg>';
+  }
+
+  var LV_COLOR = { 0: '#12a15a', 1: '#7dbb3f', 2: '#d9a10b', 3: '#ef7d21', 4: '#e5484d' };
+
+  function tempBar(pct) {
+    var p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+    return '<div class="temp">' +
+      '<div class="temp__track"><span class="temp__marker" style="left:' + p.toFixed(1) + '%"></span></div>' +
+      '<div class="temp__scale"><span>0 便宜</span><span>50 中位</span><span>100 贵</span></div>' +
+      '</div>';
+  }
+
+  /* ---------------- 卡片 ---------------- */
+
+  function quoteLabel(ts) {
+    var st = sessionState();
+    if (st === 'open') return hm(ts);
+    if (st === 'break') return '午休';
+    return '收盘';
+  }
+
+  function cardHTML(m) {
+    var e = m.etf, L = LEVELS[m.level];
+    var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
+    var prem = m.premium == null ? null : m.premium;
+    var premCls = prem == null ? 'is-na' : (prem > 2 ? 'is-up' : (prem < -0.3 ? 'is-down' : ''));
+    var tag = e.market === 'US' ? 'QDII · 美股' : (e.market === 'HK' ? 'QDII · 港股' : 'A股');
+    var paused = e.purchase && e.purchase.indexOf('暂停') >= 0;
+    return '<article class="etf ' + L.cls + '" data-code="' + esc(e.code) + '" role="button" tabindex="0">' +
+      '<div class="etf__top">' +
+        '<div><h3 class="etf__name">' + esc(e.name) + '</h3>' +
+        '<p class="etf__sub">' + esc(e.code) + ' · ' + esc(e.indexName) + ' ' + esc(e.indexCode) + '</p></div>' +
+        '<span class="etf__tag' + (paused ? ' is-warn' : '') + '">' + (paused ? '暂停申购' : tag) + '</span>' +
+      '</div>' +
+      '<div class="etf__priceRow">' +
+        '<strong class="etf__price">' + num(m.price, m.digits) + '</strong>' +
+        '<span class="etf__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
+        '<span class="etf__time">' + quoteLabel(m.ts) + '</span>' +
+      '</div>' +
+      '<div class="etf__stats">' +
+        '<div class="etf__stat"><i>PE 分位</i><b>' + (e.pePct == null ? '--' : num(e.pePct, 1) + '%') + '</b></div>' +
+        '<div class="etf__stat"><i>股息率</i><b' + (e.dy == null ? ' class="is-na"' : '') + '>' + (e.dy == null ? '--' : num(e.dy, 2) + '%') + '</b></div>' +
+        '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '--' : signed(prem, 1)) + '</b></div>' +
+      '</div>' +
+      tempBar(e.pePct) +
+      sparkSVG(e.history, LV_COLOR[m.level]) +
+      '<div class="etf__foot">' +
+        '<span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span>' +
+        '<span class="etf__adv">' + esc(adviceOf(m)) + '</span>' +
+      '</div>' +
+      '</article>';
+  }
+
+  function quoteStamp() {
+    var t = 0;
+    for (var k in state.quotes) {
+      var v = state.quotes[k] && state.quotes[k].time;
+      if (v && v > t) t = v;
+    }
+    return t || state.lastUpdate;
+  }
+
+  function renderHome() {
+    var ms = ETFS.map(model);
+    var counts = [0, 0, 0, 0, 0];
+    ms.forEach(function (m) { counts[m.base]++; });
+    var names = { 0: '便宜', 1: '偏低', 2: '适中', 3: '偏高', 4: '偏贵' };
+    var parts = [];
+    for (var i = 0; i < 5; i++) if (counts[i]) parts.push(counts[i] + ' 只' + names[i]);
+    var text = '按估值分位：' + (parts.length ? parts.join('、') : '数据加载中') + '。';
+    var highPrem = ms.filter(function (m) { return m.premium != null && m.premium > 2; });
+    if (highPrem.length) {
+      text += '但 ' +
+        highPrem.map(function (m) { return m.etf.name + '（溢价 ' + signed(m.premium, 1) + '）'; }).join('、') +
+        ' 场内价明显高于净值，已按「偏贵」处理——同样的资产要多付钱，先别追高。';
+    } else {
+      var cheap = ms.filter(function (m) { return m.level <= 1; });
+      text += cheap.length
+        ? '溢价正常，' + cheap.map(function (m) { return m.etf.name; }).join('、') + ' 可以多买一点。'
+        : '溢价正常，按档位买就行。';
+    }
+
+    var st = sessionState();
+    var dotCls = st === 'open' ? 'is-live' : (st === 'break' ? 'is-break' : '');
+    var stText = st === 'open' ? '交易中' : (st === 'break' ? '午间休市' : '已收盘');
+    var genTs = DATA.generatedAtISO ? Date.parse(DATA.generatedAtISO) : null;
+    $('#homeAdvice').innerHTML =
+      '<div class="advice__head"><span class="advice__dot ' + dotCls + '"></span>' +
+      stText + ' · ' + (quoteStamp() ? md(quoteStamp()) + ' 收盘价' : '暂无行情') +
+      ' · 估值 ' + (genTs ? md(genTs) : '--') + '</div>' +
+      '<p class="advice__text">' + esc(text) + '</p>';
+
+    $('#cardGrid').innerHTML = ms.map(cardHTML).join('');
+    $('#homeMeta').textContent = ms.length + ' 只 · 点开看明细';
+    $('#homeNote').textContent = '颜色越红代表越贵；溢价 = 场内价 ÷ 参考净值（IOPV）− 1，QDII 高溢价说明你在为同样的资产多付钱。';
+    $('#dataDate').textContent = '行情 ' + (quoteStamp() ? md(quoteStamp()) : '--') +
+      ' · 估值 ' + (genTs ? md(genTs) : '--');
+  }
+
+  /* ---------------- 定投 ---------------- */
+
+  function readBudget() {
+    var v = Number(localStorage.getItem(LS_BUDGET));
+    return isFinite(v) && v > 0 ? v : 3000;
+  }
+
+  function renderPlan() {
+    var budget = state.budget;
+    var base = budget / (ETFS.length || 1);
+    var rows = ETFS.map(function (e) {
+      var m = model(e);
+      var L = LEVELS[m.level];
+      var amt = Math.round((base * L.mult) / 10) * 10;
+      return { m: m, L: L, amt: amt };
+    });
+    var sum = rows.reduce(function (a, r) { return a + r.amt; }, 0);
+    var cash = budget - sum;
+
+    $('#allocList').innerHTML = rows.map(function (r) {
+      return '<div class="alloc">' +
+        '<div class="alloc__l"><div class="alloc__name">' + esc(r.m.etf.name) + ' ' + esc(r.m.etf.code) + '</div>' +
+        '<div class="alloc__sub">' + r.L.label + ' · ' + r.L.mult.toFixed(1) + ' 倍' +
+        (r.m.premium != null && r.m.premium > 2 ? ' · 溢价 ' + num(r.m.premium, 1) + '% 已降档' : '') + '</div></div>' +
+        '<div class="alloc__amt' + (r.amt === 0 ? ' is-zero' : '') + '">' + money(r.amt) + '</div>' +
+        '</div>';
+    }).join('');
+
+    $('#allocTotal').innerHTML = '<span>合计买入</span><b>' + money(sum) + '</b>';
+    $('#allocPos').textContent = cash > 0
+      ? '本次留现金 ' + money(cash) + '（估值都偏高时多留一点，等回落再加）。分配按分位档位加权，仅供参考。'
+      : '按当前档位已把预算分完。分配按分位档位加权，仅供参考。';
+
+    var input = $('#budgetInput');
+    if (input && Number(input.value) !== budget) input.value = String(budget);
+  }
+
+  function setBudget(v) {
+    v = Math.max(0, Math.round(Number(v) || 0));
+    state.budget = v;
+    localStorage.setItem(LS_BUDGET, String(v));
+    var chips = document.querySelectorAll('#budgetChips .chip');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].classList.toggle('is-on', Number(chips[i].getAttribute('data-amount')) === v);
+    }
+    renderPlan();
+  }
+
+  /* ---------------- 数据页 ---------------- */
+
+  function renderData() {
+    $('#dataList').innerHTML = ETFS.map(function (e) {
+      var m = model(e);
+      var bits = [
+        '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
+        'PE <b>' + num(e.pe, 2) + '</b>',
+        'PB <b>' + num(e.pb, 2) + '</b>',
+        '股息率 <b>' + (e.dy == null ? '--' : num(e.dy, 2) + '%') + '</b>',
+        '分位 <b>' + (e.pePct == null ? '--' : num(e.pePct, 1) + '%') + '</b>',
+        '估值日 ' + esc((e.valDate || '--').slice(5))
+      ].map(function (s) { return '<span class="datarow__bit">' + s + '</span>'; });
+      return '<div class="datarow">' +
+        '<div class="datarow__top"><span class="datarow__name">' + esc(e.name) + ' ' + esc(e.code) + '</span>' +
+        '<span class="pill ' + LEVELS[m.level].cls + '">' + LEVELS[m.level].label + '</span></div>' +
+        '<div class="datarow__meta">' + bits.join('<span class="datarow__sep"> · </span>') +
+        '<span class="datarow__bit">估算净值 ' + num(m.iopv, 4) + '</span>' +
+        '<span class="datarow__sep"> · </span>' +
+        '<span class="datarow__bit">溢价 ' + signed(m.premium, 2) + '</span><br>' +
+        '<span class="datarow__bit">' + esc(e.valNote || '') + '</span></div>' +
+        '</div>';
+    }).join('');
+    $('#dataUpdated').textContent = DATA.generatedAt || '';
+    $('#dataStatusText').textContent =
+      '数据源：' + (DATA.source || '--') + '。行情、IOPV 由浏览器直连腾讯财经，估值与净值每日早上由 GitHub Actions 重新生成；' +
+      '513530 跟踪的中证港股通高股息指数没有免费 PB 与股息率口径，相关字段显示「--」。';
+  }
+
+  /* ---------------- 说明页 ---------------- */
+
+  function renderAbout() {
+    $('#aboutProse').innerHTML =
+      '<h3>四个指标</h3>' +
+      '<p><b>价格</b>：ETF 场内成交价，交易日 9:15–11:30、13:00–15:00 每 20 秒刷新一次。</p>' +
+      '<p><b>PE 分位</b>：当前市盈率在过去 5 年里的位置，0% 最便宜、100% 最贵。分位低只说明「相对自己便宜」，不代表绝对安全。</p>' +
+      '<p><b>股息率</b>：指数近一年分红 ÷ 指数点位，来自蛋卷基金。513530 的港股通高股息指数暂无免费口径，显示「--」。</p>' +
+      '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。</p>' +
+      '<h3>买入建议怎么来的</h3>' +
+      '<p>只看分位：&lt;20% 便宜、20–40% 偏低、40–60% 适中、60–80% 偏高、≥80% 偏贵。溢价超过 2% 降一档，超过 5% 直接归为「偏贵 · 暂停买入」——QDII 尤其要防这一点。</p>' +
+      '<h3>定投分配</h3>' +
+      '<p>预算平均分成 5 份，再按档位加权：便宜 ×1.5、偏低 ×1.2、适中 ×1.0、偏高 ×0.6、偏贵 ×0.2。分不完的钱留现金。</p>' +
+      '<h3>数据与更新</h3>' +
+      '<p>估值、净值、股息率每天由 GitHub Actions 跑 <code>node fetch-data.mjs</code> 写进 <code>data.js</code>；行情是浏览器实时拉的。想手动更新，在仓库里跑 <code>node fetch-data.mjs</code> 再提交即可。</p>' +
+      '<p><b>装到桌面</b>：iPhone 用 Safari 打开后点「分享」→「添加到主屏幕」；安卓和电脑 Chrome 用地址栏右侧的安装图标。装好后从图标进入，全屏显示，最近一次数据离线也能看。</p>' +
+      '<p class="fine">本页仅为个人研究记录，不构成投资建议。数据来自公开接口，可能延迟、缺失或有误；ETF 有跟踪误差、汇率与限购风险，决策请自行核实。</p>';
+  }
+
+  /* ---------------- 详情面板 ---------------- */
+
+  function sheetHTML(m) {
+    var e = m.etf, L = LEVELS[m.level];
+    var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
+    var kv = [
+      ['估算净值', num(m.iopv, 4)],
+      ['场内溢价', signed(m.premium, 2)],
+      ['PE', num(e.pe, 2)],
+      ['PB', num(e.pb, 2)],
+      ['股息率', e.dy == null ? '--' : num(e.dy, 2) + '%'],
+      ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')],
+      ['估值日', e.valDate || '--'],
+      ['申购状态', e.purchase || '--']
+    ].map(function (row) {
+      return '<div class="kv__row"><span class="kv__k">' + row[0] + '</span><span class="kv__v">' + esc(row[1]) + '</span></div>';
+    }).join('');
+
+    var reasons = [
+      'PE ' + num(e.pe, 2) + '，处于' + (e.valNote && e.valNote.indexOf('自算') >= 0 ? '近 5 年' : '历史') + ' ' + num(e.pePct, 1) + '% 分位' + (e.pePct >= 80 ? '（高位）' : (e.pePct < 20 ? '（低位）' : '')),
+      m.premium == null ? '溢价数据缺失' : '场内价 ' + num(m.price, m.digits) + '，估算净值 ' + num(m.iopv, 4) + '，溢价 ' + signed(m.premium, 2),
+      '结论：' + L.label + ' · ' + L.action
+    ];
+
+    return '<div class="sheet__grip"></div>' +
+      '<div class="sheet__head">' +
+        '<div><h3 class="sheet__title">' + esc(e.name) + '</h3>' +
+        '<p class="sheet__sub">' + esc(e.code) + ' · ' + esc(e.fullName || '') + '</p></div>' +
+        '<button class="sheet__close" type="button" data-close="1" aria-label="关闭">×</button>' +
+      '</div>' +
+      '<div class="sheet__price"><strong>' + num(m.price, m.digits) + '</strong>' +
+      '<span class="sheet__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
+      '<span class="etf__time">' + quoteLabel(m.ts) + '</span></div>' +
+      '<div class="sheet__brief"><span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span> ' + esc(adviceOf(m)) + '</div>' +
+      tempBar(e.pePct) +
+      '<div class="kv">' + kv + '</div>' +
+      '<div class="chart"><div class="chart__cap"><span>' + esc(e.indexName) + ' PE 走势</span><span>来源：' + esc(e.valNote || '--') + '</span></div>' +
+        chartSVG(e.history, LV_COLOR[m.level]) + '</div>' +
+      '<ul class="reasons">' + reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>' +
+      '<p class="fine" style="margin-top:14px">溢价按实时 IOPV（交易所参考净值）估算，QDII 会受汇率与时差影响；本页不构成投资建议。</p>';
+  }
+
+  function openSheet(code) {
+    var etf = null;
+    for (var i = 0; i < ETFS.length; i++) if (ETFS[i].code === code) etf = ETFS[i];
+    if (!etf) return;
+    state.openCode = code;
+    $('#sheetPanel').innerHTML = sheetHTML(model(etf));
+    $('#sheetPanel').scrollTop = 0;
+    $('#sheet').classList.add('is-open');
+  }
+
+  function closeSheet() {
+    state.openCode = null;
+    $('#sheet').classList.remove('is-open');
+  }
+
+  function openSheetHTML(html) {
+    state.openCode = null;
+    $('#sheetPanel').innerHTML = html;
+    $('#sheetPanel').scrollTop = 0;
+    $('#sheet').classList.add('is-open');
+  }
+
+  /* ---------------- 安装到桌面 ---------------- */
+
+  var LS_INSTALL = 'etf_install_hint_v1';
+
+  function isStandalone() {
+    return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      window.navigator.standalone === true;
+  }
+
+  function showInstall(mode) {
+    var el = $('#installBar');
+    if (!el || isStandalone() || localStorage.getItem(LS_INSTALL) === '1') return;
+    state.installMode = mode;
+    $('#installText').textContent = mode === 'ios'
+      ? '点底部「分享」→「添加到主屏幕」，之后像 App 一样打开'
+      : '加到桌面或应用列表，打开更快、还能离线看最近一次数据';
+    $('#installGo').textContent = mode === 'ios' ? '看步骤' : '添加';
+    el.hidden = false;
+  }
+
+  function closeInstall(remember) {
+    var el = $('#installBar');
+    if (el) el.hidden = true;
+    if (remember) localStorage.setItem(LS_INSTALL, '1');
+  }
+
+  function installGuide(mode) {
+    var head = mode === 'ios' ? '装到 iPhone 主屏' : '装到桌面';
+    var sub = mode === 'ios' ? 'Safari 里三步，之后像 App 一样打开' : 'Chrome / Edge 一键安装，之后从图标打开';
+    var body = mode === 'ios'
+      ? '<ol class="steps">' +
+        '<li>用 <b>Safari</b> 打开本页（微信里打开的要先点右上角「在浏览器中打开」）。</li>' +
+        '<li>点底部中间的 <b>分享</b> 按钮（方框向上箭头）。</li>' +
+        '<li>往下滑，选 <b>「添加到主屏幕」</b>，再点右上角「添加」。</li>' +
+        '</ol>' +
+        '<p class="fine">安卓 Chrome 会直接弹出安装提示；没弹的话在右上角菜单里选「安装应用」或「添加到主屏幕」。</p>'
+      : '<ol class="steps">' +
+        '<li>点地址栏右侧的 <b>安装</b> 图标（显示器加箭头），或打开浏览器菜单。</li>' +
+        '<li>选 <b>「安装 ETF 温度计」</b> / 「应用」→「安装此站点」。</li>' +
+        '<li>装好后从桌面、开始菜单或应用列表打开，全屏显示。</li>' +
+        '</ol>' +
+        '<p class="fine">没有安装入口，说明浏览器不支持或已经装过；直接用书签收藏也行。</p>';
+    openSheetHTML(
+      '<div class="sheet__grip"></div>' +
+      '<div class="sheet__head"><div><h3 class="sheet__title">' + head + '</h3>' +
+      '<p class="sheet__sub">' + sub + '</p></div>' +
+      '<button class="sheet__close" type="button" data-close="1" aria-label="关闭">×</button></div>' +
+      body +
+      '<p class="fine">装好后从图标进入，页面全屏显示，行情照常实时刷新。</p>'
+    );
+  }
+
+  function onInstallGo() {
+    var d = state.deferred;
+    if (state.installMode !== 'ios' && d && d.prompt) {
+      state.deferred = null;
+      closeInstall(true);
+      var p = d.prompt();
+      if (p && p.catch) p.catch(function () { installGuide('desktop'); });
+      return;
+    }
+    installGuide(state.installMode === 'ios' ? 'ios' : 'desktop');
+  }
+
+  function initInstall() {
+    window.addEventListener('beforeinstallprompt', function (ev) {
+      ev.preventDefault();
+      state.deferred = ev;
+      showInstall('desktop');
+    });
+    window.addEventListener('appinstalled', function () {
+      state.deferred = null;
+      closeInstall(true);
+      toast('已添加到桌面');
+    });
+
+    var ua = navigator.userAgent || '';
+    var isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (isIOS && !isStandalone() && localStorage.getItem(LS_INSTALL) !== '1') {
+      setTimeout(function () { showInstall('ios'); }, 2500);
+    }
+  }
+
+  /* ---------------- 实时行情 ---------------- */
+
+  /* 腾讯批量行情：一次请求拿齐 5 只的价格、IOPV、溢价率、净值 */
+
+  var TX_URL = 'https://qt.gtimg.cn/q=';
+
+  function txTime(s) {
+    if (!s || s.length < 14) return null;
+    return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8),
+      +s.slice(8, 10), +s.slice(10, 12), +s.slice(12, 14)).getTime();
+  }
+
+  function fetchLive() {
+    var symbols = ETFS.map(function (e) { return 'sh' + e.code; });
+    var url = TX_URL + symbols.join(',') + '&_=' + Date.now();
+    return fetch(url, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('行情 HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (buf) {
+        var text = new TextDecoder('gbk').decode(buf);
+        var re = /v_((?:sh|sz)\d{6})="([^"]*)"/g;
+        var map = {}, m;
+        while ((m = re.exec(text))) map[m[1]] = m[2].split('~');
+        var got = 0;
+        ETFS.forEach(function (e) {
+          var a = map['sh' + e.code];
+          if (!a || a.length < 84) return;
+          var price = +a[3], prev = +a[4], iopv = +a[78], prem = +a[77], nav = +a[81];
+          if (!price) return;
+          state.quotes[e.code] = {
+            price: price,
+            changePct: prev ? (price / prev - 1) * 100 : null,
+            iopv: iopv > 0 ? iopv : null,
+            premium: isFinite(prem) ? prem : null,
+            nav: nav > 0 ? nav : null,
+            time: txTime(a[30])
+          };
+          got++;
+        });
+        state.lastUpdate = Date.now();
+        if (!got) throw new Error('行情为空');
+        return true;
+      });
+  }
+
+  function schedule(delay) {
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(tick, delay);
+  }
+
+  function tick() {
+    var st = sessionState();
+    if (st === 'open') {
+      fetchLive().then(function (ok) {
+        if (ok) renderActive();
+      }).catch(function () {
+        /* 静默，保留旧数据 */
+      }).then(function () {
+        schedule(20000);
+      });
+    } else if (st === 'break') {
+      schedule(60000);
+    } else {
+      schedule(nextOpenDelay());
+    }
+  }
+
+  function renderActive() {
+    if (state.view === 'home') renderHome();
+    else if (state.view === 'plan') renderPlan();
+    else if (state.view === 'data') renderData();
+    if (state.openCode) {
+      var etf = null;
+      for (var i = 0; i < ETFS.length; i++) if (ETFS[i].code === state.openCode) etf = ETFS[i];
+      if (etf) $('#sheetPanel').innerHTML = sheetHTML(model(etf));
+    }
+  }
+
+  /* ---------------- 事件 ---------------- */
 
   var toastTimer = null;
   function toast(msg) {
     var el = $('#toast');
     el.textContent = msg;
     el.classList.add('is-on');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.classList.remove('is-on'); }, 1800);
-  }
-
-  /* ---------------- 迷你走势图 ---------------- */
-  var sparkSeq = 0;
-  function sparkline(history, color) {
-    if (!history || history.length < 3) return '<span class="hint">暂无走势</span>';
-    var vals = history.map(function (p) { return p[1]; });
-    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
-    var W = 120, H = 34, pad = 3;
-    var span = (max - min) || 1;
-    var pts = vals.map(function (v, i) {
-      var x = pad + i * (W - pad * 2) / (vals.length - 1);
-      var y = H - pad - (v - min) / span * (H - pad * 2);
-      return [x, y];
-    });
-    var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
-    var gid = 'sg' + (++sparkSeq);
-    var last = pts[pts.length - 1];
-    return '' +
-      '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
-      '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">' +
-      '<stop offset="0%" stop-color="' + color + '" stop-opacity=".28"/>' +
-      '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
-      '</linearGradient></defs>' +
-      '<path d="' + d + ' L' + (W - pad) + ',' + H + ' L' + pad + ',' + H + ' Z" fill="url(#' + gid + ')"/>' +
-      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>' +
-      '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.2" fill="' + color + '"/>' +
-      '</svg>';
-  }
-
-  /* ---------------- 温度条 ---------------- */
-  function tempBar(p) {
-    return '' +
-      '<div class="temp">' +
-      '<div class="temp__track"><i class="temp__marker" style="left:' + clamp(p, 1, 99).toFixed(1) + '%"></i></div>' +
-      '<div class="temp__scale"><span>便宜 0</span><span>50</span><span>贵 100</span></div>' +
-      '</div>';
-  }
-
-  function metric(k, v, unit, sub) {
-    return '<div class="metric"><div class="metric__k">' + k + '</div>' +
-      '<div class="metric__v">' + (v == null ? '--' : v) + (unit ? '<span>' + unit + '</span>' : '') + '</div>' +
-      (sub ? '<div class="metric__k" style="opacity:.85">' + sub + '</div>' : '') + '</div>';
-  }
-
-  /* ---------------- 首页 ---------------- */
-  function renderHome() {
-    var rows = DATA.indices.map(function (idx) { return { idx: idx, s: scoreOf(idx, state.manual) }; });
-    var ready = rows.filter(function (r) { return r.s.ready; });
-
-    /* 本月建议 */
-    var advice = $('#homeAdvice');
-    if (!ready.length) {
-      advice.innerHTML = '<div class="advice"><div class="advice__head"><span class="advice__title">本月建议</span></div>' +
-        '<p class="hint">还没有可用数据。请到「数据」页更新或手动录入。</p></div>';
-    } else {
-      var sorted = ready.slice().sort(function (a, b) { return a.s.p - b.s.p; });
-      var html = sorted.map(function (r) {
-        var sg = r.s.signal;
-        return '<div class="advice__row">' +
-          '<span class="pill ' + sg.cls + '">' + sg.label.split(' · ')[0] + '</span>' +
-          '<span class="advice__name">' + esc(r.idx.name) + '</span>' +
-          '<span class="advice__act">' + sg.advice + '（定投 ×' + sg.mult + '）</span>' +
-          '</div>';
-      }).join('');
-      var pend = rows.filter(function (r) { return !r.s.ready; });
-      if (pend.length) {
-        html += '<div class="advice__row"><span class="pill pill--pending">待录入</span>' +
-          '<span class="advice__name">' + pend.map(function (r) { return esc(r.idx.name); }).join('、') + '</span>' +
-          '<span class="advice__act">点卡片填写估值</span></div>';
-      }
-      advice.innerHTML = '<div class="advice"><div class="advice__head">' +
-        '<span class="advice__title">本月建议 · 按便宜程度排序</span>' +
-        '<span class="chip chip--ok">' + ready.length + '/' + rows.length + ' 有数据</span></div>' +
-        '<div class="advice__list">' + html + '</div></div>';
-    }
-
-    /* 卡片 */
-    $('#cardGrid').innerHTML = rows.map(function (r) {
-      var idx = r.idx, s = r.s, v = s.v, sg = s.signal;
-      var tag = idx.family === 'dividend' ? (idx.market === '港股通' ? '港股红利' : 'A股红利') : '美股宽基';
-      var head = '' +
-        '<div class="card__top">' +
-        '<div style="min-width:0">' +
-        '<div class="card__name">' + esc(idx.name) + '</div>' +
-        '<div class="card__code">' + esc(idx.code) + ' · ' + esc(idx.market) + '</div>' +
-        '</div>' +
-        '<span class="card__tag">' + tag + '</span>' +
-        '</div>';
-
-      var body;
-      if (!s.ready) {
-        body = '<div class="card__score"><div class="score-num" style="font-size:26px;letter-spacing:-.5px">待录入</div></div>' +
-          '<p class="hint">这个指数的估值需要手动填一次（PE 分位、股息率），填完自动参与计算。</p>';
-      } else {
-        var pctTxt = function (p, d) { return p == null ? '' : '分位 ' + Math.round(p) + '%' + (d ? '*' : ''); };
-        var dyPart = s.parts.filter(function (x) { return x.key === 'dy'; })[0];
-        body = '' +
-          '<div class="card__score">' +
-          '<div class="score-num" style="color:' + sg.color + '">' + Math.round(s.p) + '<small>%</small></div>' +
-          '<div class="card__score-meta"><span class="pill ' + sg.cls + '">' + sg.label + '</span>' +
-          (s.coverage < 0.7 ? '<span class="pill pill--pending">口径不全</span>' : '') + '</div>' +
-          '</div>' +
-          tempBar(s.p) +
-          '<div class="metrics">' +
-          metric('PE', num(v.pe, 2), '', pctTxt(v.pePct, v.pePctDerived)) +
-          metric('PB', num(v.pb, 2), '', pctTxt(v.pbPct, false)) +
-          metric('股息率', num(v.dy, 2), '%', dyPart && dyPart.derived ? '刻度换算*' : (idx.family === 'dividend' ? '越高越便宜' : '参考')) +
-          '</div>' +
-          '<div class="card__foot">' +
-          '<div class="spark" style="color:' + sg.color + '">' + sparkline(idx.history, sg.color) + '</div>' +
-          '<span class="mult">定投 ×' + sg.mult + '</span>' +
-          '</div>';
-      }
-
-      return '<button class="card" data-id="' + esc(idx.id) + '" type="button">' +
-        (v && v.isManual ? '<span class="badge-manual">手动</span>' : '') +
-        head + body + '</button>';
-    }).join('');
-
-    $('#homeCount').textContent = '共 ' + rows.length + ' 个指数 · 点击看详情';
-    $('#dataDate').textContent = fmtDate(ready.length ? ready[0].s.v.date : null);
-
-    var updated = DATA.generatedAt ? DATA.generatedAt.replace(/:\d{2}$/, '') : '--';
-    $('#homeNote').innerHTML =
-      '<b>数据：</b>' + esc(DATA.source || '本地数据') + '，更新于 ' + esc(updated) + '。<br>' +
-      '<b>怎么读：</b>百分比是指数当前估值在自身历史中的位置（0%=最便宜，100%=最贵）。' +
-      '红利类看 PE / PB / 股息率，美股看 PE / PB。<br>' +
-      '<b>* 号：</b>该分位是用经验刻度或 5 年序列估算的，不是官方历史分位（港股通高股息只能这样）。<br>' +
-      '<b>提醒：</b>分位只说明“相对自己过去贵不贵”，不预测短期涨跌。本工具仅供研究，不构成投资建议。';
-
-    $$('#cardGrid .card').forEach(function (el) {
-      el.addEventListener('click', function () { openDetail(el.getAttribute('data-id')); });
-    });
-  }
-
-  /* ---------------- 详情面板 ---------------- */
-  function ring(p, color) {
-    var r = 46, C = 2 * Math.PI * r, dash = (clamp(p, 0, 100) / 100) * C;
-    return '<div class="ring">' +
-      '<svg viewBox="0 0 108 108" aria-hidden="true">' +
-      '<circle cx="54" cy="54" r="' + r + '" fill="none" stroke="var(--line)" stroke-width="9"/>' +
-      '<circle cx="54" cy="54" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="9" ' +
-      'stroke-linecap="round" stroke-dasharray="' + dash.toFixed(1) + ' ' + C.toFixed(1) + '"/>' +
-      '</svg>' +
-      '<div class="ring__center"><div class="ring__num" style="color:' + color + '">' + Math.round(p) + '<span style="font-size:13px">%</span></div>' +
-      '<div class="ring__cap">综合分位</div></div>' +
-      '</div>';
-  }
-
-  function bigChart(history, color) {
-    if (!history || history.length < 3) return '<p class="hint">暂无历史序列。</p>';
-    var W = 320, H = 132, pl = 34, pr = 8, pt = 10, pb = 20;
-    var vals = history.map(function (p) { return p[1]; });
-    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
-    var span = (max - min) || 1;
-    var med = vals.slice().sort(function (a, b) { return a - b; })[Math.floor(vals.length / 2)];
-    var x = function (i) { return pl + i * (W - pl - pr) / (vals.length - 1); };
-    var y = function (v) { return pt + (1 - (v - min) / span) * (H - pt - pb); };
-
-    var d = vals.map(function (v, i) { return (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(v).toFixed(1); }).join(' ');
-    var lastX = x(vals.length - 1), lastY = y(vals[vals.length - 1]);
-    var gid = 'bg' + (++sparkSeq);
-    var grid = [0, 0.5, 1].map(function (t) {
-      var yy = pt + t * (H - pt - pb);
-      return '<line x1="' + pl + '" y1="' + yy.toFixed(1) + '" x2="' + (W - pr) + '" y2="' + yy.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>';
-    }).join('');
-
-    return '<div class="chart"><svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="PE 五年走势">' +
-      '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">' +
-      '<stop offset="0%" stop-color="' + color + '" stop-opacity=".22"/>' +
-      '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/></linearGradient></defs>' +
-      grid +
-      '<line x1="' + pl + '" y1="' + y(med).toFixed(1) + '" x2="' + (W - pr) + '" y2="' + y(med).toFixed(1) + '" stroke="var(--muted)" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>' +
-      '<path d="' + d + ' L' + lastX.toFixed(1) + ',' + (H - pb) + ' L' + pl + ',' + (H - pb) + ' Z" fill="url(#' + gid + ')"/>' +
-      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
-      '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="3.4" fill="' + color + '"/>' +
-      '<text x="' + (pl - 6) + '" y="' + (pt + 4) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + max.toFixed(1) + '</text>' +
-      '<text x="' + (pl - 6) + '" y="' + (H - pb + 3) + '" text-anchor="end" font-size="9" fill="var(--muted)">' + min.toFixed(1) + '</text>' +
-      '<text x="' + pl + '" y="' + (H - 6) + '" font-size="9" fill="var(--muted)">5 年前</text>' +
-      '<text x="' + (W - pr) + '" y="' + (H - 6) + '" text-anchor="end" font-size="9" fill="var(--muted)">现在</text>' +
-      '</svg>' +
-      '<div class="chart-legend"><span><i style="background:' + color + '"></i>PE（周）</span>' +
-      '<span><i style="background:var(--muted);opacity:.6"></i>中位数 ' + med.toFixed(1) + '</span></div></div>';
-  }
-
-  function openDetail(id) {
-    var idx = DATA.indices.filter(function (x) { return x.id === id; })[0];
-    if (!idx) return;
-    var s = scoreOf(idx, state.manual);
-    var v = s.v, sg = s.signal;
-    state.detailId = id;
-
-    var meta = esc(idx.code) + ' · ' + esc(idx.market) + ' · ' +
-      (v.isManual ? '手动录入' : '自动抓取') + ' · 数据日 ' + fmtDate(v.date);
-
-    var scoreBlock;
-    if (s.ready) {
-      scoreBlock = '<div class="ring-wrap">' + ring(s.p, sg.color) +
-        '<div class="ring-side"><span class="pill ' + sg.cls + '">' + sg.label + '</span>' +
-        '<span class="hint">建议定投倍数 <b>×' + sg.mult + '</b><br>' + sg.advice + '</span></div></div>';
-    } else {
-      scoreBlock = '<div class="ring-wrap"><div class="ring"><svg viewBox="0 0 108 108">' +
-        '<circle cx="54" cy="54" r="46" fill="none" stroke="var(--line)" stroke-width="9"/></svg>' +
-        '<div class="ring__center"><div class="ring__num" style="font-size:16px;color:var(--muted)">待录入</div></div></div>' +
-        '<div class="ring-side"><span class="pill pill--pending">缺少估值</span>' +
-        '<span class="hint">填下面的表单，或者运行 <code>node tools/fetch-data.mjs</code> 更新。</span></div></div>';
-    }
-
-    var kv = s.parts.map(function (p) {
-      return '<div class="kv__row">' +
-        '<div class="kv__top"><span class="kv__k">' + p.label +
-        (p.derived ? '<em>' + (p.key === 'dy' ? '按股息率水平换算'
-          : (idx.history && idx.history.length > 20 ? '按近5年估算' : '按经验刻度换算')) + '</em>' : '') +
-        '</span>' +
-        '<span class="kv__v"><b>' + num(p.value, p.key === 'dy' ? 2 : 2) + p.unit + '</b>' +
-        '<s>分位 ' + Math.round(p.pct) + '%</s></span></div>' +
-        '<div class="kv__bar"><i style="width:' + p.pct.toFixed(1) + '%;background:' + (p.pct < 35 ? 'var(--cheap)' : p.pct < 55 ? 'var(--fair)' : p.pct < 75 ? 'var(--warm)' : 'var(--rich)') + '"></i></div>' +
-        '<div class="hint" style="margin-top:4px">权重 ' + Math.round(p.weight * 100) + '%</div>' +
-        '</div>';
-    }).join('');
-
-    var reasons = '';
-    if (s.ready) {
-      var list = [];
-      var maxPart = s.parts.slice().sort(function (a, b) { return b.pct * b.weight - a.pct * a.weight; })[0];
-      list.push('综合分位 <b>' + s.p.toFixed(1) + '%</b>，落在「' + sg.label.replace(' · ', '，') + '」区间（阈值 ' +
-        sg.min + '%~' + sg.max + '%）。');
-      if (maxPart) {
-        list.push('拉高/拉低分数最多的是 <b>' + maxPart.label + '</b>：当前 ' + num(maxPart.value, 2) + maxPart.unit +
-          '，处于历史 <b>' + Math.round(maxPart.pct) + '%</b> 分位。');
-      }
-      var cheapest = s.parts.slice().sort(function (a, b) { return a.pct - b.pct; })[0];
-      if (cheapest && cheapest.key !== (maxPart && maxPart.key)) {
-        list.push('相对便宜的是 <b>' + cheapest.label + '</b>（' + Math.round(cheapest.pct) + '% 分位）。');
-      }
-      list.push('操作：' + sg.advice + '；分位每下降 15 个百分点，可再提高一档定投额。');
-      reasons = list.map(function (t) { return '<div><span>·</span><span>' + t + '</span></div>'; }).join('');
-    }
-
-    var m = state.manual[idx.id] || {};
-    var form = '' +
-      '<div class="manual-form">' +
-      '<div class="field field--full"><span class="field__label">数据日期</span>' +
-      '<input type="date" id="fDate" value="' + esc((m.date || v.date || '').slice(0, 10)) + '"></div>' +
-      '<div class="field"><span class="field__label">市盈率 PE</span><input type="number" step="0.01" id="fPe" value="' + (v.pe == null ? '' : v.pe) + '" placeholder="如 9.50"></div>' +
-      '<div class="field"><span class="field__label">PB（可留空）</span><input type="number" step="0.01" id="fPb" value="' + (v.pb == null ? '' : v.pb) + '" placeholder="如 0.95"></div>' +
-      '<div class="field"><span class="field__label">PE 历史分位 %</span><input type="number" step="1" min="0" max="100" id="fPePct" value="' + (v.pePct == null ? '' : Math.round(v.pePct)) + '" placeholder="0-100"></div>' +
-      '<div class="field"><span class="field__label">股息率 %</span><input type="number" step="0.01" id="fDy" value="' + (v.dy == null ? '' : v.dy) + '" placeholder="如 4.35"></div>' +
-      '</div>' +
-      '<p class="hint" style="margin-top:8px">PE 分位可从「中证指数官网 / 韭圈儿 / 理杏仁」查；' +
-      '只填 PE + 股息率也能算（有 5 年序列的按序列估算，港股通高股息没有公开序列，按经验刻度换算，标 *）。' +
-      '填了真实 PE 分位后，以你填的为准。</p>' +
-      '<div class="btns" style="margin-top:12px">' +
-      '<button class="btn btn--primary" id="btnSaveManual">保存并计算</button>' +
-      '<button class="btn" id="btnResetManual">恢复自动数据</button>' +
-      '</div>';
-
-    $('#sheetPanel').innerHTML = '' +
-      '<div class="sheet__grip"></div>' +
-      '<div class="sheet__head">' +
-      '<div><div class="sheet__title">' + esc(idx.name) + '</div><div class="sheet__sub">' + meta + '</div></div>' +
-      '<button class="sheet__close" data-close="1" aria-label="关闭">×</button>' +
-      '</div>' +
-      scoreBlock +
-      (s.ready ? '<div class="kv">' + kv + '</div>' : '') +
-      bigChart(idx.history, sg ? sg.color : 'var(--muted)') +
-      (reasons ? '<div class="section-title" style="margin:14px 0 8px"><h2 style="font-size:13px">判定依据</h2></div><div class="reasons">' + reasons + '</div>' : '') +
-      '<div class="section-title" style="margin:18px 0 8px"><h2 style="font-size:13px">手动修正</h2><span>只存在本机</span></div>' +
-      form;
-
-    var sheet = $('#sheet');
-    sheet.hidden = false;
-    document.body.style.overflow = 'hidden';
-
-    $$('#sheet [data-close]').forEach(function (el) {
-      el.addEventListener('click', closeDetail);
-    });
-    $('#btnSaveManual').addEventListener('click', function () {
-      var obj = {};
-      var grab = function (id, key) {
-        var el = $('#' + id);
-        if (!el) return;
-        var val = el.value.trim();
-        if (val !== '' && !isNaN(Number(val))) obj[key] = Number(val);
-      };
-      grab('fPe', 'pe'); grab('fPb', 'pb'); grab('fPePct', 'pePct'); grab('fDy', 'dy');
-      var d = $('#fDate').value;
-      if (d) obj.date = d;
-      if (!Object.keys(obj).length) { toast('至少填一项'); return; }
-      state.manual[idx.id] = obj;
-      saveJSON(LS_MANUAL, state.manual);
-      renderAll();
-      openDetail(idx.id);
-      toast('已保存，已重新计算');
-    });
-    $('#btnResetManual').addEventListener('click', function () {
-      delete state.manual[idx.id];
-      saveJSON(LS_MANUAL, state.manual);
-      renderAll();
-      openDetail(idx.id);
-      toast('已恢复自动数据');
-    });
-  }
-
-  function closeDetail() {
-    $('#sheet').hidden = true;
-    document.body.style.overflow = '';
-    state.detailId = null;
-  }
-
-  /* ---------------- 定投计划 ---------------- */
-  function renderPlan() {
-    var budget = Number(state.budget) || 0;
-    $('#budgetInput').value = budget || '';
-    $$('#budgetChips button').forEach(function (b) {
-      b.classList.toggle('is-on', Number(b.getAttribute('data-amount')) === budget);
-    });
-
-    var rows = DATA.indices.map(function (idx) { return { idx: idx, s: scoreOf(idx, state.manual) }; });
-    var ready = rows.filter(function (r) { return r.s.ready; });
-    var base = ready.length ? budget / ready.length : 0;
-
-    var raw = rows.map(function (r) { return r.s.ready ? base * r.s.signal.mult : 0; });
-    var sum = raw.reduce(function (a, b) { return a + b; }, 0);
-    var scale = sum > budget && sum > 0 ? budget / sum : 1;
-    var amounts = raw.map(function (x) { return Math.round((x * scale) / 10) * 10; });
-    var total = amounts.reduce(function (a, b) { return a + b; }, 0);
-    var rest = Math.max(0, budget - total);
-
-    $('#allocList').innerHTML = rows.map(function (r, i) {
-      var sg = r.s.signal;
-      var pill = r.s.ready
-        ? '<span class="pill ' + sg.cls + '" style="font-size:11px">' + Math.round(r.s.p) + '%</span>'
-        : '<span class="pill pill--pending" style="font-size:11px">待录入</span>';
-      var mult = r.s.ready ? '×' + sg.mult : '—';
-      return '<div class="alloc__row">' +
-        '<div><div class="alloc__name">' + esc(r.idx.name) + ' ' + pill + '</div>' +
-        '<div class="alloc__sub">等权基准 ¥' + money(base) + ' ' + mult + '</div></div>' +
-        '<div class="alloc__mult">' + mult + '</div>' +
-        '<div class="alloc__amt' + (amounts[i] ? '' : ' is-zero') + '">¥' + money(amounts[i]) + '</div>' +
-        '</div>';
-    }).join('');
-
-    $('#allocTotal').innerHTML = '¥' + money(total) + ' <span style="font-size:12px;color:var(--muted);font-weight:500">/ 现金 ¥' + money(rest) + '</span>';
-
-    if (!budget) {
-      $('#allocList').innerHTML = '<p class="hint">先填一个月度金额试试。</p>';
-      $('#allocTotal').textContent = '--';
-    }
-  }
-
-  /* ---------------- 数据页 ---------------- */
-  function renderData() {
-    $('#dataUpdated').textContent = DATA.generatedAt ? '生成于 ' + DATA.generatedAt : '';
-    $('#dataList').innerHTML = DATA.indices.map(function (idx) {
-      var s = scoreOf(idx, state.manual);
-      var v = s.v;
-      var status = v.isManual
-        ? '<span class="chip chip--warn">手动</span>'
-        : (s.ready ? '<span class="chip chip--ok">自动</span>' : '<span class="chip chip--warn">待补</span>');
-      return '<div class="datarow">' +
-        '<div class="datarow__l"><div class="datarow__name">' + esc(idx.name) + ' <span style="font-size:11px;color:var(--muted)">' + esc(idx.code) + '</span></div>' +
-        '<div class="datarow__meta">' + (s.ready
-          ? 'PE ' + num(v.pe, 2) + ' · PB ' + num(v.pb, 2) + ' · 股息率 ' + num(v.dy, 2) + '% · ' + fmtDate(v.date)
-          : '暂无数据') + '</div></div>' +
-        '<div style="display:flex;align-items:center;gap:8px">' + status +
-        '<button class="btn btn--ghost" data-edit="' + esc(idx.id) + '">录入</button></div>' +
-        '</div>';
-    }).join('');
-
-    $$('#dataList [data-edit]').forEach(function (b) {
-      b.addEventListener('click', function () { openDetail(b.getAttribute('data-edit')); });
-    });
-
-    var manualCount = Object.keys(state.manual).length;
-    $('#dataStatusText').textContent = '共 ' + DATA.indices.length + ' 个指数，其中 ' + manualCount +
-      ' 个使用手动数据；手动数据只保存在本机浏览器，清缓存会丢，记得截图留档。';
-  }
-
-  /* ---------------- 说明页 ---------------- */
-  function renderAbout() {
-    $('#aboutProse').innerHTML = '' +
-      '<h3>这个 APP 在算什么</h3>' +
-      '<p>它不预测涨跌，只回答一个问题：<b>这个指数现在的估值，放在它自己的历史里算贵还是便宜？</b>答案是一个 0~100% 的分位，越低越便宜。</p>' +
-      '<div class="formula">综合分位 = Σ( 指标分位 × 权重 ) ÷ Σ权重\n\n红利类：PE 45% + PB 20% + 股息率 35%\n美股宽基：PE 60% + PB 40%</div>' +
-      '<p>股息率越高越便宜，所以先把它换算成分位（股息率 4% ≈ 28% 分位，5% ≈ 6% 分位）。这是个经验对照表，不是历史分位；如果你有真实分位，直接在手填表单里填 PE 分位/股息率覆盖即可。</p>' +
-
-      '<h3>分位对应的操作</h3>' +
-      '<table class="tbl"><thead><tr><th>综合分位</th><th>判断</th><th>定投倍数</th></tr></thead><tbody>' +
-      '<tr><td>0% – 20%</td><td>低估 · 加码</td><td>×2.0</td></tr>' +
-      '<tr><td>20% – 35%</td><td>偏低 · 多买</td><td>×1.5</td></tr>' +
-      '<tr><td>35% – 55%</td><td>合理 · 定投</td><td>×1.0</td></tr>' +
-      '<tr><td>55% – 70%</td><td>偏高 · 少买</td><td>×0.6</td></tr>' +
-      '<tr><td>70% – 85%</td><td>高估 · 暂停</td><td>×0.2</td></tr>' +
-      '<tr><td>85% – 100%</td><td>极高 · 止盈</td><td>×0</td></tr>' +
-      '</tbody></table>' +
-
-      '<h3>为什么这样配权重</h3>' +
-      '<ul>' +
-      '<li>红利指数靠分红，<b>股息率</b>最直接，给 35%；PE/PB 看资产定价水平，合计 65%。</li>' +
-      '<li>纳指 100、标普 500 的分红率低（1% 上下），股息率没有区分度，主要看 PE、PB。</li>' +
-      '<li>同一分位下，港股通高股息的绝对估值更低，但汇率、流动性、股息税会让折价长期存在，所以<b>不要跨市场比绝对值</b>，只看各自的历史分位。</li>' +
-      '</ul>' +
-
-      '<h3>数据从哪来</h3>' +
-      '<ul>' +
-      '<li>PE / PB / 历史分位 / 5 年 PE 序列：蛋卷基金指数估值公开接口，脚本自动抓取。</li>' +
-      '<li>港股通高股息（930915，人民币计价）：暂无免费公开接口，在 APP 里手动录入 PE 分位和股息率。</li>' +
-      '<li>每只指数的数据日期显示在卡片与详情里，过期了就去「数据」页更新。</li>' +
-      '</ul>' +
-
-      '<h3>它做不到什么</h3>' +
-      '<ul>' +
-      '<li>分位是<b>相对自身历史</b>，全市场估值整体抬升时，所有指数分位都会变高，不代表马上要跌。</li>' +
-      '<li>不处理盈利周期：周期股盈利塌陷时 PE 会显得很贵、PB 很便宜，两者会打架。</li>' +
-      '<li>没有考虑汇率、股息税、ETF 溢价、你的持仓成本。</li>' +
-      '<li>历史分位窗口由数据源决定（约 10 年），不是严格 10 年。</li>' +
-      '</ul>' +
-
-      '<h3>免责声明</h3>' +
-      '<p>本工具仅用于个人研究记录，<b>不构成任何投资建议</b>。数据可能延迟或有误，请以中证指数公司、交易所及基金公司公告为准。据此操作，风险自负。</p>';
-  }
-
-  /* ---------------- 总渲染 & 交互 ---------------- */
-  function renderAll() {
-    renderHome();
-    renderPlan();
-    renderData();
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove('is-on'); }, 2000);
   }
 
   function switchView(name) {
-    if (!['home', 'plan', 'data', 'about'].includes(name)) name = 'home';
     state.view = name;
-    $$('.view').forEach(function (v) { v.classList.toggle('is-active', v.id === 'view-' + name); });
-    $$('.tab').forEach(function (t) { t.classList.toggle('is-active', t.getAttribute('data-view') === name); });
-    if (location.hash !== '#' + name) {
-      try { history.replaceState(null, '', '#' + name); } catch (e) { /* file:// 下部分浏览器限制，忽略 */ }
-    }
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    var views = document.querySelectorAll('.view');
+    for (var i = 0; i < views.length; i++) views[i].classList.toggle('is-active', views[i].id === 'view-' + name);
+    var tabs = document.querySelectorAll('#tabbar .tab');
+    for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('is-active', tabs[j].getAttribute('data-view') === name);
+    if (name === 'home') renderHome();
+    else if (name === 'plan') renderPlan();
+    else if (name === 'data') renderData();
+    else if (name === 'about') renderAbout();
+    window.scrollTo(0, 0);
   }
 
-  function init() {
-    renderAll();
-    renderAbout();
-
-    $$('.tab').forEach(function (t) {
-      t.addEventListener('click', function () { switchView(t.getAttribute('data-view')); });
+  function bind() {
+    $('#tabbar').addEventListener('click', function (ev) {
+      var btn = ev.target.closest ? ev.target.closest('.tab') : null;
+      if (btn) switchView(btn.getAttribute('data-view'));
     });
+
+    $('#cardGrid').addEventListener('click', function (ev) {
+      var card = ev.target.closest ? ev.target.closest('.etf') : null;
+      if (card) openSheet(card.getAttribute('data-code'));
+    });
+
+    $('#cardGrid').addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      var card = ev.target.closest ? ev.target.closest('.etf') : null;
+      if (card) { ev.preventDefault(); openSheet(card.getAttribute('data-code')); }
+    });
+
+    $('#sheet').addEventListener('click', function (ev) {
+      if (ev.target.getAttribute && ev.target.getAttribute('data-close')) closeSheet();
+    });
+
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && $('#sheet').classList.contains('is-open')) closeSheet();
+    });
+
+    document.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#installGo')) { onInstallGo(); return; }
+      if (t.closest('#installClose')) closeInstall(true);
+    });
+
+    initInstall();
 
     $('#btnRefresh').addEventListener('click', function () {
-      renderAll();
-      toast('已按当前数据重新计算');
-    });
-
-    var input = $('#budgetInput');
-    input.addEventListener('input', function () {
-      state.budget = Math.max(0, Number(input.value) || 0);
-      saveJSON(LS_BUDGET, state.budget);
-      renderPlan();
-    });
-
-    $$('#budgetChips button').forEach(function (b) {
-      b.addEventListener('click', function () {
-        state.budget = Number(b.getAttribute('data-amount'));
-        saveJSON(LS_BUDGET, state.budget);
-        renderPlan();
+      var btn = this;
+      btn.classList.add('is-spin');
+      fetchLive().then(function (ok) {
+        renderActive();
+        toast(ok ? '行情已更新' : '未取到新行情');
+      }).catch(function () {
+        toast('行情刷新失败，显示上次数据');
+      }).then(function () {
+        btn.classList.remove('is-spin');
       });
     });
 
-    $('#btnExport').addEventListener('click', function () {
-      var payload = {
-        exportedAt: new Date().toISOString(),
-        data: DATA,
-        manual: state.manual,
-        computed: DATA.indices.map(function (idx) {
-          var s = scoreOf(idx, state.manual);
-          return { id: idx.id, name: idx.name, p: s.p == null ? null : Number(s.p.toFixed(1)), signal: s.signal ? s.signal.key : null, mult: s.signal ? s.signal.mult : null };
-        })
-      };
-      var text = JSON.stringify(payload, null, 2);
-      try {
-        var blob = new Blob([text], { type: 'application/json' });
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'valuation-' + new Date().toISOString().slice(0, 10) + '.json';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-        toast('已导出 JSON');
-      } catch (e) {
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(text).then(function () { toast('已复制到剪贴板'); }, function () { toast('导出失败'); });
-        } else { toast('当前环境不支持导出'); }
+    $('#budgetChips').addEventListener('click', function (ev) {
+      var chip = ev.target.closest ? ev.target.closest('.chip') : null;
+      if (chip) setBudget(chip.getAttribute('data-amount'));
+    });
+
+    $('#budgetInput').addEventListener('input', function () {
+      var v = Number(this.value);
+      if (isFinite(v) && v >= 0) {
+        state.budget = v;
+        localStorage.setItem(LS_BUDGET, String(v));
+        renderPlan();
       }
     });
+  }
 
-    $('#btnClearManual').addEventListener('click', function () {
-      if (!Object.keys(state.manual).length) { toast('没有手动数据'); return; }
-      state.manual = {};
-      saveJSON(LS_MANUAL, state.manual);
-      renderAll();
-      toast('已清除手动数据');
+  /* ---------------- 启动 ---------------- */
+
+  function boot() {
+    ETFS.forEach(function (e) {
+      state.quotes[e.code] = {
+        price: e.price, changePct: e.changePct,
+        time: e.quoteTime ? Date.parse(e.quoteTime) : null,
+        digits: Math.max(2, Math.min(3, dig(e.price) || 3))
+      };
+    });
+    state.budget = readBudget();
+    bind();
+    switchView('home');
+    setBudget(state.budget);
+    renderData();
+    renderAbout();
+
+    // 首屏先拿一次行情（即使不在交易时段，也能拿到最新指数价算溢价）
+    fetchLive().then(function () { renderActive(); }).catch(function () {}).then(function () {
+      schedule(sessionState() === 'open' ? 20000 : 5000);
     });
 
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDetail(); });
-
-    // 深链：#plan / #data / #about，以及 #detail=ndx 直接打开某只指数
-    var hash = (location.hash || '').replace('#', '');
-    if (hash.indexOf('detail=') === 0) {
-      var id = hash.split('=')[1];
-      setTimeout(function () { openDetail(id); }, 30);
-    } else if (hash) {
-      switchView(hash);
-    }
-    window.addEventListener('hashchange', function () {
-      var h = (location.hash || '').replace('#', '');
-      if (h && h.indexOf('detail=') !== 0) switchView(h);
-    });
-
-    // 离线缓存（用 file:// 打开时会注册失败，忽略即可）
-    if ('serviceWorker' in navigator && location.protocol === 'https:') {
-      navigator.serviceWorker.register('sw.js').catch(function () {});
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('./sw.js').catch(function () {});
+      });
     }
   }
 
-  // 供 Node 单测使用
-  window.__APP_CALC = { dyToPct: dyToPct, signalOf: signalOf, scoreOf: scoreOf, resolve: resolve, pctFromSeries: pctFromSeries };
-
-  if (typeof document !== 'undefined') {
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-    else init();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 })();

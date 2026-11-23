@@ -1,153 +1,99 @@
-<!doctype html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#f2f4f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#14532d">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="估值温度计">
-<meta name="description" content="中证红利、红利低波、港股通高股息、纳指100、标普500 的估值分位与定投买入时机">
-<title>估值温度计 · 五大指数买入时机</title>
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icon-192.png">
-<link rel="icon" href="icon-192.png">
-<link rel="stylesheet" href="app.css">
+<meta name="apple-mobile-web-app-title" content="ETF 温度计">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="515080 / 513530 / 563020 / 513100 / 513650 五只红利与 QDII ETF 的盘中价格、PE 估值分位、股息率与买入建议;">
+<title>ETF 温度计 · 五只 ETF 估值看板</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="stylesheet" href="./app.css?v=6">
 </head>
 <body>
 
 <header class="topbar">
-  <div class="topbar__inner wrap">
-    <div class="brand">
-      <div class="brand__logo">估</div>
-      <div style="min-width:0">
-        <h1>估值温度计</h1>
-        <p class="brand__sub">红利 · 低波红利 · 港股通高股息 · 纳指100 · 标普500</p>
-      </div>
-    </div>
-    <div class="topbar__meta">
-      <span class="chip" id="dataDate">--</span>
-      <button class="icon-btn" id="btnRefresh" aria-label="刷新" title="刷新">↻</button>
+  <div class="brand">
+    <div class="brand__logo">估</div>
+    <div>
+      <h1 class="brand__name">ETF 温度计</h1>
+      <div class="brand__sub" id="dataDate">正在读取数据…</div>
     </div>
   </div>
+  <button class="icon-btn" id="btnRefresh" type="button" aria-label="刷新行情">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path>
+    </svg>
+  </button>
 </header>
 
 <main class="wrap">
 
-  <section id="view-home" class="view is-active">
-    <div id="homeAdvice"></div>
-    <div class="section-title">
-      <h2>指数温度</h2>
-      <span id="homeCount"></span>
-    </div>
-    <div id="cardGrid" class="grid"></div>
-    <div class="note" id="homeNote"></div>
+  <section class="view is-active" id="view-home">
+    <div class="advice" id="homeAdvice"></div>
+    <div class="section-title"><h2>五只 ETF</h2><span id="homeMeta"></span></div>
+    <div class="grid" id="cardGrid"></div>
+    <p class="note" id="homeNote"></p>
   </section>
 
-  <section id="view-plan" class="view">
+  <section class="view" id="view-plan">
     <div class="panel">
-      <h3>每月可投入金额</h3>
-      <div class="money-input">
-        <b>¥</b>
-        <input id="budgetInput" type="number" inputmode="numeric" min="0" step="100" placeholder="3000">
-      </div>
+      <div class="section-title"><h2>本期定投预算</h2></div>
+      <label class="field">
+        <span class="field__label">金额（元）</span>
+        <input class="money-input" id="budgetInput" type="number" inputmode="decimal" min="0" step="100" value="3000">
+      </label>
       <div class="chips" id="budgetChips">
-        <button data-amount="1000">1000</button>
-        <button data-amount="3000">3000</button>
-        <button data-amount="5000">5000</button>
-        <button data-amount="10000">10000</button>
-      </div>
-      <p class="hint" style="margin-top:12px">
-        按「等权基准 × 估值倍数」分配：分位越低买得越多，高估则少买或暂停，
-        省下的钱留在货币基金里等机会。
-      </p>
-    </div>
-
-    <div class="panel">
-      <h3>本月分配</h3>
-      <div class="alloc" id="allocList"></div>
-      <div class="total">
-        <span>本月实际投入 / 剩余待机</span>
-        <strong id="allocTotal">--</strong>
+        <button class="chip" type="button" data-amount="1000">1000</button>
+        <button class="chip" type="button" data-amount="3000">3000</button>
+        <button class="chip" type="button" data-amount="5000">5000</button>
+        <button class="chip" type="button" data-amount="10000">10000</button>
       </div>
     </div>
-
-    <div class="note">
-      <b>操作提示：</b>每月固定一天（例如发薪日后第一个交易日）打开 APP 看一次，
-      把分配金额下单即可；中间涨跌不用管。手痒想加仓时，先看分位有没有到 20% 以下。
-    </div>
+    <div class="section-title"><h2>按估值分位分配</h2><span>越便宜买越多</span></div>
+    <div class="alloclist" id="allocList"></div>
+    <div class="total" id="allocTotal"></div>
+    <p class="note" id="allocPos"></p>
   </section>
 
-  <section id="view-data" class="view">
-    <div class="section-title">
-      <h2>数据来源与更新</h2>
-      <span id="dataUpdated"></span>
-    </div>
-
-    <div id="dataList" class="datalist"></div>
-
-    <div class="panel" style="margin-top:16px">
-      <h3>更新数据</h3>
-      <p class="hint" style="margin-bottom:12px">
-        在电脑上打开项目文件夹，执行下面这行命令，会用最新收盘数据重写 <code>data.js</code>，
-        重新打开 APP 即可（APP 内手动录入的数值会保留在自己的手机上）。
-      </p>
-      <div class="formula">node tools/fetch-data.mjs</div>
-      <div class="btns">
-        <button class="btn btn--primary" id="btnExport">导出当前数据 JSON</button>
-        <button class="btn btn--danger" id="btnClearManual">清除全部手动录入</button>
-      </div>
-    </div>
-
-    <div class="note">
-      <b>当前状态：</b><span id="dataStatusText">--</span>
-    </div>
+  <section class="view" id="view-data">
+    <div class="section-title"><h2>估值明细</h2><span id="dataUpdated"></span></div>
+    <div class="datalist" id="dataList"></div>
+    <p class="note" id="dataStatusText"></p>
   </section>
 
-  <section id="view-about" class="view">
-    <div class="panel prose" id="aboutProse"></div>
+  <section class="view" id="view-about">
+    <div class="section-title"><h2>怎么读这张表</h2></div>
+    <div class="prose" id="aboutProse"></div>
   </section>
 
 </main>
 
 <nav class="tabbar" id="tabbar">
-  <button class="tab is-active" data-view="home">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/>
-      <rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>
-    </svg>
-    <span>总览</span>
-  </button>
-  <button class="tab" data-view="plan">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="4" y="2.5" width="16" height="19" rx="3"/><path d="M8 6.5h8M8 10.5h2M14 10.5h2M8 14.5h2M14 14.5h2M8 18h2M14 18h2"/>
-    </svg>
-    <span>定投</span>
-  </button>
-  <button class="tab" data-view="data">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <ellipse cx="12" cy="5.5" rx="7.5" ry="3"/><path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/>
-      <path d="M4.5 11.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/>
-    </svg>
-    <span>数据</span>
-  </button>
-  <button class="tab" data-view="about">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.4"/>
-    </svg>
-    <span>说明</span>
-  </button>
+  <button class="tab is-active" type="button" data-view="home">总览</button>
+  <button class="tab" type="button" data-view="plan">定投</button>
+  <button class="tab" type="button" data-view="data">数据</button>
+  <button class="tab" type="button" data-view="about">说明</button>
 </nav>
 
-<div class="sheet" id="sheet" hidden>
+<div class="sheet" id="sheet">
   <div class="sheet__backdrop" data-close="1"></div>
-  <div class="sheet__panel" id="sheetPanel" role="dialog" aria-modal="true" aria-label="指数详情"></div>
+  <div class="sheet__panel" id="sheetPanel"></div>
+</div>
+
+<div class="install" id="installBar" hidden>
+  <div class="install__text" id="installText"></div>
+  <button class="btn btn--primary btn--sm" id="installGo" type="button">添加</button>
+  <button class="icon-btn icon-btn--sm" id="installClose" type="button" aria-label="关闭">×</button>
 </div>
 
 <div class="toast" id="toast"></div>
 
-<script src="data.js"></script>
-<script src="app.js"></script>
+<script src="./data.js?v=6"></script>
+<script src="./app.js?v=6"></script>
 </body>
 </html>
