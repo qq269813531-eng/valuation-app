@@ -1,4 +1,4 @@
-﻿/* ETF 温度计 —— 移动优先的静态看板 */
+/* ETF 温度计 —— 移动优先的静态看板 */
 :root {
   --bg: #eef1f0;
   --bg-soft: #e6eae8;
@@ -238,6 +238,7 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
   padding: 10px 0 0;
   border-top: 1px dashed var(--line);
 }
+.etf__stats--2 { grid-template-columns: repeat(2, 1fr); }
 .etf__stat i { display: block; font-style: normal; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .etf__stat b { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .etf__stat b.is-up { color: var(--up); }

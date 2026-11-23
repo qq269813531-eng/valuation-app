@@ -174,14 +174,14 @@
     return (v == null || v === 0) ? '—' : num(v, 2) + '%';
   }
 
-  // 股息利差 = 股息率 − 10 年期国债收益率，单位是百分点
-  function spreadLine(m) {
-    if (!m.isDiv) return '';
+  // 股息利差 = 股息率 − 10 年期国债收益率，单位是百分点。
+  // 现在直接排在卡片第一行指标里（跟股息率分位同一行），不再单独占一行。
+  function spreadStat(m) {
     if (m.spread == null) {
-      return '<div class="etf__spread"><i>股息利差</i><b class="is-na">—</b></div>';
+      return '<div class="etf__stat"><i>股息利差</i><b class="is-na">—</b></div>';
     }
     var tone = m.spread > 0 ? 'is-down' : 'is-up'; // 利差大=划算=绿，利差薄=红
-    return '<div class="etf__spread"><i>股息利差</i>' +
+    return '<div class="etf__stat"><i>股息利差</i>' +
       '<b class="' + tone + '">' + signed(m.spread, 2) + '</b></div>';
   }
 
@@ -304,14 +304,14 @@
         '<span class="etf__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
         '<span class="etf__time">' + quoteLabel(m.ts) + '</span>' +
       '</div>' +
-      '<div class="etf__stats">' +
+      '<div class="etf__stats' + (m.isDiv ? '' : ' etf__stats--2') + '">' +
         (m.isDiv
-          ? '<div class="etf__stat"><i>股息率分位（1 年）</i><b>' + pctText(e.dyPct) + '</b></div>'
-          : '<div class="etf__stat"><i>PE 分位</i><b>' + pctText(e.pePct) + '</b></div>') +
-        '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
-        '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>' +
+          ? '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(e.dyPct) + '</b></div>' +
+            '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
+            spreadStat(m)
+          : '<div class="etf__stat"><i>PE 分位</i><b>' + pctText(e.pePct) + '</b></div>' +
+            '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>') +
       '</div>' +
-      spreadLine(m) +
       tempBar(m.scorePct) +
       sparkSVG(e.history, LV_COLOR[m.level]) +
       '<div class="etf__foot">' +
