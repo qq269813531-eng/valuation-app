@@ -581,3 +581,20 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
 .datarow__bit b.is-up { color: var(--up); font-weight: 600; }
 .datarow__bit b.is-down { color: var(--down); font-weight: 600; }
 .datarow__bit b.is-flat { color: var(--text-2); font-weight: 600; }
+
+/* 股息利差：股息率 − 5 年国债收益率 */
+.etf__spread {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+}
+.etf__spread i { font-style: normal; color: var(--muted); flex: none; }
+.etf__spread b { font-size: 14px; font-variant-numeric: tabular-nums; }
+.etf__spread b.is-up { color: var(--up); }
+.etf__spread b.is-down { color: var(--down); }
+.etf__spread b.is-na { color: var(--muted); }
+.etf__spread span { color: var(--muted); font-variant-numeric: tabular-nums; }

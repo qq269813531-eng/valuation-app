@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 五只 ETF 跟踪数据生成器
  *
  * 运行： node fetch-data.mjs
@@ -31,7 +31,7 @@ const EM_UT = 'fa5fd1943c7b386f172d6893dbfba10b';
 const ETFS = [
   {
     code: '515080',
-    name: '中证红利ETF',
+    name: '中证红利',
     fullName: '招商中证红利ETF',
     indexCode: '000922',
     indexName: '中证红利',
@@ -45,7 +45,7 @@ const ETFS = [
   },
   {
     code: '513530',
-    name: '港股通红利ETF',
+    name: '港股红利',
     fullName: '华泰柏瑞中证港股通高股息投资ETF(QDII)',
     indexCode: '930914',
     indexName: '港股通高股息',
@@ -59,7 +59,7 @@ const ETFS = [
   },
   {
     code: '563020',
-    name: '红利低波ETF',
+    name: '低波红利',
     fullName: '易方达中证红利低波动ETF',
     indexCode: 'H30269',
     indexName: '中证红利低波',
@@ -73,7 +73,7 @@ const ETFS = [
   },
   {
     code: '513100',
-    name: '纳指100ETF',
+    name: '纳指',
     fullName: '国泰纳斯达克100ETF(QDII)',
     indexCode: 'NDX',
     indexName: '纳指100',
@@ -87,7 +87,7 @@ const ETFS = [
   },
   {
     code: '513650',
-    name: '标普500ETF',
+    name: '标普',
     fullName: '南方标普500ETF(QDII)',
     indexCode: 'SP500',
     indexName: '标普500',
@@ -150,6 +150,51 @@ async function emKline(secid, lmt = 20) {
     const [date, close] = line.split(',');
     return { date, close: Number(close) };
   });
+}
+
+/* ---------------- 国债收益率 ---------------- */
+
+/**
+ * 中国 5 年期国债到期收益率（%），东财数据中心的中美国债收益率表。
+ * EMM00166462 = 中国国债收益率5年，EMM00166466 = 10年（见 akshare bond_em 的字段映射）。
+ */
+async function cn5yYield() {
+  const url =
+    'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPTA_WEB_TREASURYYIELD' +
+    '&columns=ALL&sortColumns=SOLAR_DATE&sortTypes=-1&pageSize=5&pageNumber=1';
+  const j = await getJSON(url, { Referer: 'https://data.eastmoney.com/' });
+  const rows = j?.result?.data || [];
+  for (const row of rows) {
+    const v = Number(row.EMM00166462);
+    if (Number.isFinite(v) && v > 0) {
+      return { y5: round(v, 4), y10: row.EMM00166466 == null ? null : round(Number(row.EMM00166466), 4), date: String(row.SOLAR_DATE || '').slice(0, 10) };
+    }
+  }
+  throw new Error('无国债收益率数据');
+}
+
+/* ---------------- 价格分位 ---------------- */
+/* ---------------- 价格分位 ---------------- */
+
+/**
+ * 指数近 5 年收盘价分位：最新收盘在近 1250 个交易日里的位置。
+ * 红利类指数多年上涨、PE 又长期下移，只看 PE 分位会显得「一直很贵」，
+ * 价格分位是一个只跟价格有关的对照。
+ */
+async function priceStat(indexSecid) {
+  const k = await emKline(indexSecid, 1300);
+  const closes = k.map((x) => x.close).filter((v) => v > 0);
+  if (closes.length < 200) throw new Error('价格序列太短');
+  const win = closes.slice(-1250);
+  const last = win[win.length - 1];
+  let below = 0;
+  for (const c of win) if (c <= last) below += 1;
+  return {
+    pricePct: round((below / win.length) * 100, 1),
+    pxLow: round(Math.min(...win), 2),
+    pxHigh: round(Math.max(...win), 2),
+    pxWindow: win.length,
+  };
 }
 
 /* ---------------- 净值 ---------------- */
@@ -295,6 +340,10 @@ async function buildOne(cfg, quotes) {
     pb: null,
     pePct: null,
     pbPct: null,
+    pricePct: null,
+    pxLow: null,
+    pxHigh: null,
+    composite: null,
     dy: null,
     ttmDiv: null,
     divCount: 0,
@@ -364,6 +413,20 @@ async function buildOne(cfg, quotes) {
     out.divError = e.message;
   }
 
+  // 价格分位
+  try {
+    const ps = await priceStat(cfg.indexSecid);
+    out.pricePct = ps.pricePct;
+    out.pxLow = ps.pxLow;
+    out.pxHigh = ps.pxHigh;
+  } catch (e) {
+    out.pxError = e.message;
+  }
+
+  // 综合分位：PE / PB / 价格三个分位的均值，缺哪个就跳过哪个
+  const parts = [out.pePct, out.pbPct, out.pricePct].filter((v) => v != null);
+  out.composite = parts.length ? round(parts.reduce((a, b) => a + b, 0) / parts.length, 1) : null;
+
   return out;
 }
 
@@ -393,12 +456,21 @@ async function main() {
     await sleep(400);
   }
 
+  let treasury = null;
+  try {
+    treasury = await cn5yYield();
+    console.log(`✓ 5 年期国债收益率 ${treasury.y5}%（${treasury.date}）`);
+  } catch (e) {
+    console.warn(`✗ 国债收益率失败：${e.message}`);
+  }
+
   const now = new Date();
   const payload = {
     generatedAt: now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
     generatedAtISO: now.toISOString(),
     model: 'pe-percentile-5y-v1',
-    source: '东方财富行情 · 蛋卷基金估值 · 中证指数官网',
+    source: '东方财富行情 · 蛋卷基金估值 · 中证指数官网 · 中债国债收益率',
+    treasury,
     etfs,
   };
 

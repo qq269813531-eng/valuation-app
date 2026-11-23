@@ -131,9 +131,11 @@
     var dy = (etf.ttmDiv != null && price)
       ? (etf.ttmDiv / price) * 100
       : etf.dy;
+    var y5 = (DATA.treasury && DATA.treasury.y5 != null) ? DATA.treasury.y5 : null;
+    var spread = (dy != null && dy > 0 && y5 != null) ? dy - y5 : null;
     return {
       etf: etf, price: price, chg: chg, ts: ts, iopv: iopv, premium: premium,
-      base: base, level: level, digits: 3, dy: dy
+      base: base, level: level, digits: 3, dy: dy, y5: y5, spread: spread
     };
   }
 
@@ -143,6 +145,18 @@
 
   function dyText(v) {
     return (v == null || v === 0) ? '—' : num(v, 2) + '%';
+  }
+
+  // 股息利差 = 股息率 − 5 年期国债收益率，单位是百分点（pp）
+  function spreadLine(m) {
+    if (m.spread == null) {
+      return '<div class="etf__spread"><i>股息利差</i><b class="is-na">—</b>' +
+        '<span>' + (m.y5 == null ? '国债收益率缺失' : '不分红，无利差') + '</span></div>';
+    }
+    var tone = m.spread > 0 ? 'is-up' : 'is-down';
+    return '<div class="etf__spread"><i>股息利差</i>' +
+      '<b class="' + tone + '">' + signed(m.spread, 2) + 'pp</b>' +
+      '<span>' + num(m.dy, 2) + '% − 5年国债 ' + num(m.y5, 2) + '%</span></div>';
   }
 
   // 溢价配色：正溢价标红（多付钱）、负溢价标绿（折价），±0.1% 以内算中性。
@@ -264,6 +278,7 @@
         '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
         '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>' +
       '</div>' +
+      spreadLine(m) +
       tempBar(e.pePct) +
       sparkSVG(e.history, LV_COLOR[m.level]) +
       '<div class="etf__foot">' +
@@ -329,6 +344,8 @@
         'PE <b>' + num(e.pe, 2) + '</b>',
         'PB <b>' + num(e.pb, 2) + '</b>',
         '股息率 <b>' + dyText(m.dy) + '</b>',
+        '股息利差 <b class="' + (m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-up' : 'is-down')) + '">' + (m.spread == null ? '—' : signed(m.spread, 2) + 'pp') + '</b>',
+        '5 年国债 <b>' + (m.y5 == null ? '—' : num(m.y5, 2) + '%') + '</b>',
         '综合 <b>' + pctText(e.composite) + '</b>',
         'PE 分位 <b>' + pctText(e.pePct) + '</b>',
         'PB 分位 <b>' + pctText(e.pbPct) + '</b>',
@@ -360,6 +377,7 @@
       '<p><b>价格分位</b>：指数最新收盘价在过去 5 年（约 1250 个交易日）里排第几。它只跟价格有关，不看盈利，用来对照 PE 分位。</p>' +
       '<p><b>综合分位</b>：PE 分位、PB 分位、价格分位三者的平均，买入建议用的就是它。红利类指数常年在涨、盈利也在变，只看 PE 分位会显得「一直很贵」，摊平成三个一起看更稳。513530 的指数没有免费 PB 数据，综合分位只取另外两个。</p>' +
       '<p><b>股息率</b>：这只 ETF 近 12 个月实际每份分红合计 ÷ 现价，不是指数的估算股息率。分红记录来自天天基金「分红送配」，没分过红的显示「—」。</p>' +
+      '<p><b>股息利差</b>：股息率 − 5 年期国债收益率，单位是百分点（pp）。国债收益率取中债 5 年期到期收益率（东财数据中心）。利差越大，说明「拿这份现金分红」相对无风险利率越划算；负利差意味着分红还不如存国债。它只作参考，<b>不参与买入建议打分</b>——分红的确定性、税和汇率都没算进来，QDII 尤其如此。</p>' +
       '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。卡片、数据页、详情面板用同一套配色：溢价为正标红（你在多付钱），为负标绿（折价），±0.1% 以内算平。</p>' +
       '<h3>买入建议怎么来的</h3>' +
       '<p>看综合分位：&lt;20% 便宜、20–40% 偏低、40–60% 适中、60–80% 偏高、≥80% 偏贵。溢价超过 2% 降一档，超过 5% 直接归为「偏贵 · 暂停买入」——QDII 尤其要防这一点。首页那行汇总用的也是降档后的结果。</p>' +
@@ -381,6 +399,8 @@
       ['价格分位', pctText(e.pricePct) + (e.pxLow == null ? '' : '（5 年区间 ' + num(e.pxLow, 0) + '–' + num(e.pxHigh, 0) + '）')],
       ['估算净值', num(m.iopv, 4)],
       ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
+      ['股息利差', m.spread == null ? '—' : signed(m.spread, 2) + ' pp（股息率 − 5 年国债）', m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-up' : 'is-down')],
+      ['5 年国债', m.y5 == null ? '—' : num(m.y5, 2) + '%' + (DATA.treasury && DATA.treasury.date ? '（' + DATA.treasury.date + '）' : '')],
       ['股息率', dyText(m.dy)],
       ['近 12 月分红', e.ttmDiv == null ? '—' : num(e.ttmDiv, 4) + ' 元/份'],
       ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')],
