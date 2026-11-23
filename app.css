@@ -1,4 +1,4 @@
-/* ETF 温度计 —— 移动优先的静态看板 */
+﻿/* ETF 温度计 —— 移动优先的静态看板 */
 :root {
   --bg: #eef1f0;
   --bg-soft: #e6eae8;
@@ -233,13 +233,13 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
 .etf__stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  gap: 8px 10px;
   margin-top: 12px;
   padding: 10px 0 0;
   border-top: 1px dashed var(--line);
 }
-.etf__stat i { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
-.etf__stat b { display: block; margin-top: 2px; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.etf__stat i { display: block; font-style: normal; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.etf__stat b { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .etf__stat b.is-up { color: var(--up); }
 .etf__stat b.is-down { color: var(--down); }
 .etf__stat b.is-na { color: var(--muted); }
@@ -573,3 +573,11 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
 
 .steps { margin: 14px 0 8px; padding-left: 20px; font-size: 13.5px; line-height: 1.9; color: var(--text-2); }
 .steps b { color: var(--text); }
+
+/* 溢价配色：三处共用 premTone() 的 is-up / is-down / is-flat */
+.kv__v.is-up { color: var(--up); }
+.kv__v.is-down { color: var(--down); }
+.kv__v.is-flat { color: var(--text-2); }
+.datarow__bit b.is-up { color: var(--up); font-weight: 600; }
+.datarow__bit b.is-down { color: var(--down); font-weight: 600; }
+.datarow__bit b.is-flat { color: var(--text-2); font-weight: 600; }
