@@ -1,0 +1,19 @@
+{
+  "name": "估值温度计 · 五大指数买入时机",
+  "short_name": "估值温度计",
+  "description": "中证红利、中证红利低波、港股通高股息、纳指100、标普500 的估值分位与定投倍数",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f2f4f7",
+  "theme_color": "#0b2c1c",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
+  ]
+}
