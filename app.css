@@ -281,6 +281,7 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
   background: linear-gradient(90deg, #12a15a 0%, #7dbb3f 26%, #d9a10b 50%, #ef7d21 74%, #e5484d 100%);
   opacity: .92;
 }
+.temp--div .temp__track { background: linear-gradient(90deg, #e5484d 0%, #ef7d21 26%, #d9a10b 50%, #7dbb3f 74%, #12a15a 100%); }
 .temp__marker {
   position: absolute;
   top: 50%;

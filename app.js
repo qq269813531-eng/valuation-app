@@ -270,11 +270,14 @@
 
   var LV_COLOR = { 0: '#12a15a', 1: '#7dbb3f', 2: '#d9a10b', 3: '#ef7d21', 4: '#e5484d' };
 
-  function tempBar(pct) {
+  // 温度条：红利类直接画「股息率分位」（0 = 分位最低 = 贵，100 = 分位最高 = 便宜，
+  // 所以刻度从右到左反过来、配色也反过来）；美股类画 PE 分位（0 = 便宜，100 = 贵）。
+  function tempBar(pct, kind) {
     var p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-    return '<div class="temp">' +
+    var div = kind === 'div';
+    return '<div class="temp' + (div ? ' temp--div' : '') + '">' +
       '<div class="temp__track"><span class="temp__marker" style="left:' + p.toFixed(1) + '%"></span></div>' +
-      '<div class="temp__scale"><span>0 便宜</span><span>50 中位</span><span>100 贵</span></div>' +
+      '<div class="temp__scale"><span>' + (div ? '0 贵' : '0 便宜') + '</span><span>50 中位</span><span>' + (div ? '100 便宜' : '100 贵') + '</span></div>' +
       '</div>';
   }
 
@@ -306,13 +309,13 @@
       '</div>' +
       '<div class="etf__stats' + (m.isDiv ? '' : ' etf__stats--2') + '">' +
         (m.isDiv
-          ? '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(e.dyPct) + '</b></div>' +
-            '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
+          ? '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
+            '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(e.dyPct) + '</b></div>' +
             spreadStat(m)
           : '<div class="etf__stat"><i>PE 分位</i><b>' + pctText(e.pePct) + '</b></div>' +
             '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>') +
       '</div>' +
-      tempBar(m.scorePct) +
+      tempBar(m.isDiv ? e.dyPct : e.pePct, m.isDiv ? 'div' : '') +
       sparkSVG(e.history, LV_COLOR[m.level]) +
       '<div class="etf__foot">' +
         '<span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span>' +
@@ -491,7 +494,7 @@
       '<span class="sheet__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
       '<span class="etf__time">' + quoteLabel(m.ts) + '</span></div>' +
       '<div class="sheet__brief"><span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span> ' + esc(adviceOf(m)) + '</div>' +
-      tempBar(e.pePct) +
+      tempBar(m.isDiv ? e.dyPct : e.pePct, m.isDiv ? 'div' : '') +
       '<div class="kv">' + kv + '</div>' +
       '<div class="chart"><div class="chart__cap"><span>' + esc(e.indexName) + ' PE 走势</span><span>来源：' + esc(e.valNote || '--') + '</span></div>' +
         chartSVG(e.history, LV_COLOR[m.level]) + '</div>' +
@@ -782,7 +785,21 @@
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./sw.js').catch(function () {});
+        navigator.serviceWorker.register('./sw.js').then(function (reg) {
+          // 发现新版本：让它立刻接管，然后自动刷一次。
+          // 用 sessionStorage 记一次，避免极端情况下反复刷新。
+          reg.addEventListener('updatefound', function () {
+            var nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', function () {
+              if (nw.state === 'activated' && !sessionStorage.getItem('sw_reloaded')) {
+                sessionStorage.setItem('sw_reloaded', '1');
+                location.reload();
+              }
+            });
+          });
+          reg.update().catch(function () {});
+        }).catch(function () {});
       });
     }
   }

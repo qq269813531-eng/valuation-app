@@ -1,7 +1,7 @@
 ﻿/* ETF 温度计 · Service Worker
    策略：联网优先。有网就拿最新文件，没网才用缓存里那份。
    这样改了代码刷新就能看到，不用清缓存。 */
-const CACHE = 'etf-temp-v15';
+const CACHE = 'etf-temp-v16';
 const ASSETS = [
   './',
   './index.html',
@@ -35,7 +35,7 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return; // 腾讯行情等第三方不拦截
 
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-store' })
       .then((res) => {
         if (res && res.status === 200) {
           const copy = res.clone();
