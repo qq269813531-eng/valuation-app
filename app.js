@@ -174,17 +174,15 @@
     return (v == null || v === 0) ? '—' : num(v, 2) + '%';
   }
 
-  // 股息利差 = 股息率 − 5 年期国债收益率，单位是百分点（pp）
+  // 股息利差 = 股息率 − 10 年期国债收益率，单位是百分点
   function spreadLine(m) {
     if (!m.isDiv) return '';
     if (m.spread == null) {
-      return '<div class="etf__spread"><i>股息利差</i><b class="is-na">—</b><span>' +
-        (m.y10 == null ? '国债收益率缺失' : '无分红，无法计算') + '</span></div>';
+      return '<div class="etf__spread"><i>股息利差</i><b class="is-na">—</b></div>';
     }
     var tone = m.spread > 0 ? 'is-down' : 'is-up'; // 利差大=划算=绿，利差薄=红
     return '<div class="etf__spread"><i>股息利差</i>' +
-      '<b class="' + tone + '">' + signed(m.spread, 2) + 'pp</b>' +
-      '<span>股息率 ' + num(m.dy, 2) + '% − 10年国债 ' + num(m.y10, 2) + '%</span></div>';
+      '<b class="' + tone + '">' + signed(m.spread, 2) + '</b></div>';
   }
 
   // 溢价配色：正溢价标红（多付钱）、负溢价标绿（折价），±0.1% 以内算中性。
@@ -201,8 +199,8 @@
     if (m.isDiv) {
       if (m.spread != null && m.level !== m.base) {
         return m.level < m.base
-          ? '股息利差 ' + signed(m.spread, 1) + 'pp，仍算划算，可多买一点'
-          : '股息利差只剩 ' + signed(m.spread, 1) + 'pp，比国债多不了多少，先收手';
+          ? '股息利差 ' + signed(m.spread, 1) + '，仍算划算，可多买一点'
+          : '股息利差只剩 ' + signed(m.spread, 1) + '，比国债多不了多少，先收手';
       }
       return L.desc;
     }
@@ -350,7 +348,7 @@
     var divAdj = ms.filter(function (m) { return m.isDiv && m.level !== m.base && m.spread != null; });
     if (divAdj.length) {
       text += divAdj.map(function (m) {
-        return m.etf.name + ' 股息利差 ' + signed(m.spread, 1) + 'pp，' +
+        return m.etf.name + ' 股息利差 ' + signed(m.spread, 1) + '，' +
           (m.level < m.base ? '把档位抬高了一档。' : '偏薄，把档位下调了一档。');
       }).join('');
     }
@@ -387,7 +385,7 @@
         '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
         '股息率 <b>' + dyText(m.dy) + '</b>',
         '股息率分位 <b>' + pctText(e.dyPct) + '</b>',
-        '股息利差 <b class="' + (m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')) + '">' + (m.spread == null ? '—' : signed(m.spread, 2) + 'pp') + '</b>',
+        '股息利差 <b class="' + (m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')) + '">' + (m.spread == null ? '—' : signed(m.spread, 2)) + '</b>',
         '10 年国债 <b>' + (m.y10 == null ? '—' : num(m.y10, 2) + '%') + '</b>',
         'PE 分位 <b>' + pctText(e.pePct) + '</b>',
         '价格分位 <b>' + pctText(e.pricePct) + '</b>',
@@ -426,7 +424,7 @@
       '<p><b>价格分位</b>：指数最新收盘价在过去 5 年（约 1250 个交易日）里排第几。它只跟价格有关，不看盈利，用来对照 PE 分位。</p>' +
       '<p><b>综合分位</b>：PE 分位、PB 分位、价格分位三者的平均，买入建议用的就是它。红利类指数常年在涨、盈利也在变，只看 PE 分位会显得「一直很贵」，摊平成三个一起看更稳。513530 的指数没有免费 PB 数据，综合分位只取另外两个。</p>' +
       '<p><b>股息率</b>：这只 ETF 近 12 个月实际每份分红合计 ÷ 现价，不是指数的估算股息率。分红记录来自天天基金「分红送配」，没分过红的显示「—」。</p>' +
-      '<p><b>股息利差</b>：股息率 − 5 年期国债收益率，单位是百分点（pp）。国债收益率取中债 5 年期到期收益率（东财数据中心）。利差越大，说明「拿这份现金分红」相对无风险利率越划算（卡片上标绿）；负利差意味着分红还不如存国债（标红）。它只作参考，<b>不参与买入建议打分</b>——分红的确定性、税和汇率都没算进来，QDII 尤其如此。</p>' +
+      '<p><b>股息利差</b>：股息率 − 10 年期国债收益率，直接看数字，单位是百分点。国债收益率取中债 10 年期到期收益率（东财数据中心）。利差越大，说明「拿这份现金分红」相对无风险利率越划算（卡片上标绿）；负利差意味着分红还不如存国债（标红）。<b>它参与红利类的档位调整</b>：≥4 升一档、&lt;2 降一档。分红的确定性、红利税和 QDII 的汇率都没折算进去，港股那只是税前口径。</p>' +
       '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。卡片、数据页、详情面板用同一套配色：溢价为正标红（你在多付钱），为负标绿（折价），±0.1% 以内算平。</p>' +
       '<h3>买入建议怎么来的</h3>' +
       '<p><b>三个红利 ETF</b>（中证红利、港股红利、低波红利）只看两个指标：① <b>股息率分位</b>——近 1 年里股息率排第几，越高说明价格越便宜；② <b>股息利差</b>——股息率减去 10 年期国债收益率。档位先由股息率分位定（≥80% 便宜、60–80% 偏低、40–60% 适中、20–40% 偏高、<20% 偏贵），再看利差：利差 ≥ 4 个百分点升一档（更便宜），< 2 个百分点降一档。</p>' +
@@ -447,7 +445,7 @@
     var kvRows = m.isDiv ? [
       ['股息率分位（1 年）', pctText(e.dyPct) + (e.dyLow == null ? '' : '（1 年区间 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
       ['股息率', dyText(m.dy)],
-      ['股息利差', m.spread == null ? '—' : signed(m.spread, 2) + ' pp（− 10 年国债）', m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')],
+      ['股息利差', m.spread == null ? '—' : signed(m.spread, 2), m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')],
       ['10 年国债', y10txt],
       ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
       ['估算净值', num(m.iopv, 4)],
@@ -474,7 +472,7 @@
 
     var reasons = m.isDiv ? [
       '股息率分位 ' + pctText(e.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在近 1 年里排第几，越高越便宜',
-      m.spread == null ? '股息利差缺失' : '股息利差 ' + signed(m.spread, 2) + 'pp（' + num(m.dy, 2) + '% − 10 年国债 ' + num(m.y10, 2) + '%）' +
+      m.spread == null ? '股息利差缺失' : '股息利差 ' + signed(m.spread, 2) + '（' + num(m.dy, 2) + '% − 10 年国债 ' + num(m.y10, 2) + '%）' +
         (m.spread >= 4 ? '，高利差把档位抬了一档' : (m.spread < 2 ? '，利差偏薄把档位降了一档' : '，利差在中位，不调整档位')),
       '结论：' + L.label + ' · ' + L.action
     ] : [
