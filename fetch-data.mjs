@@ -42,6 +42,8 @@ const ETFS = [
     secid: '1.515080',
     indexSecid: '1.000922',
     iopvMode: 'index',
+    // 固定分红：近 12 个月每份派现合计（元）。要更新时手动改这个数，脚本不去抓。
+    ttmDiv: 0.07,
   },
   {
     code: '513530',
@@ -54,6 +56,7 @@ const ETFS = [
     secid: '1.513530',
     indexSecid: '2.930914',
     iopvMode: 'index',
+    ttmDiv: 0.12,
   },
   {
     code: '563020',
@@ -66,6 +69,7 @@ const ETFS = [
     secid: '1.563020',
     indexSecid: '2.H30269',
     iopvMode: 'index',
+    ttmDiv: 0.048,
   },
   {
     code: '513100',
@@ -185,6 +189,8 @@ async function emNavHistory(code, want = 260) {
 /* ---------------- 分红 ---------------- */
 
 /** 近 365 天每份现金分红合计（元/份）。数据来自天天基金「分红送配」页。 */
+// 备用：抓天天基金分红页。现在分红金额改用 ETFS 里写死的 ttmDiv，此函数不再调用；
+// 想改回自动抓取时，把 buildOne 里的固定值换回 emDividend 的结果即可。
 async function emDividend(code) {
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -245,16 +251,11 @@ function toScale(last, values) {
  * 股息率分位：分红金额固定（最近 12 个月每份分红合计），逐日只换分母（不复权收盘价）。
  * 股息率高 = 价格便宜，所以分位越高越便宜。
  */
-async function dividendStat(secid, records) {
+async function dividendStat(secid, ttm) {
   const k = await emKline(secid, 300, 0);
   const rows = k.filter((x) => x.close > 0).slice(-250);
   if (rows.length < 60) throw new Error('价格序列太短');
-  const year = 365 * 86400000;
-  const lastTs = Date.parse(rows[rows.length - 1].date);
-  const ttm = records
-    .filter((r) => r.ts <= lastTs && r.ts > lastTs - year)
-    .reduce((s, r) => s + r.amount, 0);
-  if (!(ttm > 0)) throw new Error('近 12 个月没有分红');
+  if (!(ttm > 0)) throw new Error('分红金额为 0');
   const series = rows.map((row) => (ttm / row.close) * 100).filter((v) => isFinite(v) && v > 0);
   const s = toScale(series[series.length - 1], series);
   return { dyPct: s.pct, dyLow: s.lo, dyHigh: s.hi, dyTtm: round(ttm, 4), dyNow: round(series[series.length - 1], 2) };
@@ -356,16 +357,16 @@ async function buildOne(cfg, quotes) {
       }
     }
     try {
-      const div = await emDividend(cfg.code);
-      out.ttmDiv = div.ttmDiv;
-      out.divCount = div.divCount;
-      if (div.ttmDiv > 0 && div.records.length) {
-        const s = await dividendStat(cfg.secid, div.records);
+      // 分红用配置里的固定值（dividend 页不去抓，避免自动更新把预设值冲掉）
+      const ttm = cfg.ttmDiv == null ? null : cfg.ttmDiv;
+      out.ttmDiv = ttm;
+      if (ttm > 0) {
+        const s = await dividendStat(cfg.secid, ttm);
         out.dyPct = s.dyPct;
         out.dyLow = s.dyLow;
         out.dyHigh = s.dyHigh;
       }
-      out.dy = out.price && out.ttmDiv != null ? round((out.ttmDiv / out.price) * 100, 2) : null;
+      out.dy = out.price && ttm > 0 ? round((ttm / out.price) * 100, 2) : null;
     } catch (e) {
       out.divError = e.message;
     }
