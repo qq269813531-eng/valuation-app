@@ -155,8 +155,9 @@ async function emKline(secid, lmt = 20, fqt = 1) {
 /* ---------------- 股息率分位 ---------------- */
 
 /**
- * 近 1 年股息率分位：用 ETF 自己的日收盘价和分红记录，逐日还原「过去 12 个月分红 ÷ 当日价格」，
- * 再看今天的股息率在过去 250 个交易日里排第几。股息率高 = 价格便宜，所以这个分位越高越便宜。
+ * 近 1 年股息率分位：分红金额固定（用「最近 12 个月每份分红合计」这一个数），
+ * 逐日只换分母（当日不复权收盘价），得到「同样是这些分红，在每天的价格上折成几个点」的序列。
+ * 再用今天的股息率在这 250 个交易日里排第几。股息率高 = 价格便宜，所以分位越高越便宜。
  */
 async function dyPercentile(secid, records) {
   // 注意：分红金额是每份名义金额，价格必须用不复权（fqt=0），否则前复权价会把历史股息率抬高
@@ -164,33 +165,31 @@ async function dyPercentile(secid, records) {
   const rows = k.filter((x) => x.close > 0).slice(-250);
   if (rows.length < 60) throw new Error('价格序列太短');
   const year = 365 * 86400000;
-  const series = rows.map((row) => {
-    const ts = Date.parse(row.date);
-    let ttm = 0;
-    for (const r of records) if (r.ts <= ts && r.ts > ts - year) ttm += r.amount;
-    return { date: row.date, dy: ttm > 0 ? (ttm / row.close) * 100 : null };
-  }).filter((x) => x.dy != null);
-  if (!series.length) throw new Error('无分红，无法算股息率分位');
+  const lastTs = Date.parse(rows[rows.length - 1].date);
+  // 分子固定 = 最近 12 个月的分红合计；不再逐日滚动统计，避免某天窗口里少统计一笔而冒出 2.x% 的假谷
+  const ttm = records
+    .filter((r) => r.ts <= lastTs && r.ts > lastTs - year)
+    .reduce((s, r) => s + r.amount, 0);
+  if (!(ttm > 0)) throw new Error('近 12 个月没有分红，无法算股息率分位');
+  const series = rows
+    .map((row) => ({ date: row.date, dy: (ttm / row.close) * 100 }))
+    .filter((x) => isFinite(x.dy) && x.dy > 0);
   const last = series[series.length - 1].dy;
-  // 刻度取 P25 → 最大值：下端假谷（滚动窗口分红笔数偏少）切掉，上端是真实的高股息时刻，保留。
+  // 刻度取「最低–最高」：分子已经固定，序列只由价格驱动，两端都是真实的价格波动，不再需要切分位数。
   const vals = series.map((s) => s.dy).sort((a, b) => a - b);
-  const q = (p) => {
-    const idx = (vals.length - 1) * p;
-    const lo = Math.floor(idx);
-    const hi = Math.ceil(idx);
-    return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo);
-  };
-  const lo = q(0.25);
+  const lo = vals[0];
   const hi = vals[vals.length - 1];
   const span = hi - lo || 1;
   const pct = Math.max(0, Math.min(100, ((last - lo) / span) * 100));
   return {
     dyPct: round(pct, 1),
     dyNow: round(last, 2),
-    dyLow: round(lo, 2),
-    dyHigh: round(hi, 2),
+    // 刻度多留两位：前端要用这两个数把实时股息率换算成分位，舍入误差会直接体现在分位上
+    dyLow: round(lo, 4),
+    dyHigh: round(hi, 4),
     dyMin: round(vals[0], 2),
     dyMax: round(vals[vals.length - 1], 2),
+    dyTtm: round(ttm, 4),
   };
 }
 

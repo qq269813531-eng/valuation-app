@@ -144,10 +144,17 @@
     // 利差按 10 年期国债算
     var spread = (dy != null && dy > 0 && y10 != null) ? dy - y10 : null;
     var isDiv = etf.family !== 'us';
+    // 实时股息率分位：刻度（P25 与一年最高）每天由脚本烤入，分子换成浏览器现算的实时股息率，
+    // 这样盘中价格一动，分位与温度条就跟着动，不会出现「股息率变了、分位没变」。
+    var dyPct = etf.dyPct;
+    if (isDiv && dy != null && dy > 0 && etf.dyLow != null && etf.dyHigh != null && etf.dyHigh > etf.dyLow) {
+      dyPct = Math.max(0, Math.min(100, (dy - etf.dyLow) / (etf.dyHigh - etf.dyLow) * 100));
+      dyPct = Math.round(dyPct * 10) / 10;
+    }
     var base, level;
     if (isDiv) {
       // 红利类：看「近 1 年股息率分位」（越高越便宜），再用与 10 年国债的利差修正一档
-      base = invertLevel(etf.dyPct);
+      base = invertLevel(dyPct);
       level = base;
       if (spread != null) {
         if (spread >= 4) level = Math.max(0, level - 1);
@@ -158,11 +165,11 @@
       base = levelOf(etf.pePct);
       level = adjustLevel(base, premium);
     }
-    var scorePct = isDiv ? (etf.dyPct == null ? 50 : 100 - etf.dyPct) : etf.pePct;
+    var scorePct = isDiv ? (dyPct == null ? 50 : 100 - dyPct) : etf.pePct;
     return {
       etf: etf, price: price, chg: chg, ts: ts, iopv: iopv, premium: premium,
       base: base, level: level, digits: 3, dy: dy, y5: y5, y10: y10,
-      spread: spread, isDiv: isDiv, scorePct: scorePct
+      spread: spread, isDiv: isDiv, scorePct: scorePct, dyPct: dyPct, dyPctLive: dyPct !== etf.dyPct
     };
   }
 
@@ -310,12 +317,12 @@
       '<div class="etf__stats' + (m.isDiv ? '' : ' etf__stats--2') + '">' +
         (m.isDiv
           ? '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
-            '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(e.dyPct) + '</b></div>' +
+            '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(m.dyPct) + '</b></div>' +
             spreadStat(m)
           : '<div class="etf__stat"><i>PE 分位</i><b>' + pctText(e.pePct) + '</b></div>' +
             '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>') +
       '</div>' +
-      tempBar(m.isDiv ? e.dyPct : e.pePct, m.isDiv ? 'div' : '') +
+      tempBar(m.isDiv ? m.dyPct : e.pePct, m.isDiv ? 'div' : '') +
       sparkSVG(e.history, LV_COLOR[m.level]) +
       '<div class="etf__foot">' +
         '<span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span>' +
@@ -387,7 +394,7 @@
       var bits = (m.isDiv ? [
         '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
         '股息率 <b>' + dyText(m.dy) + '</b>',
-        '股息率分位 <b>' + pctText(e.dyPct) + '</b>',
+        '股息率分位 <b>' + pctText(m.dyPct) + '</b>',
         '股息利差 <b class="' + (m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')) + '">' + (m.spread == null ? '—' : signed(m.spread, 2)) + '</b>',
         '10 年国债 <b>' + (m.y10 == null ? '—' : num(m.y10, 2) + '%') + '</b>',
         'PE 分位 <b>' + pctText(e.pePct) + '</b>',
@@ -430,6 +437,7 @@
       '<p><b>股息利差</b>：股息率 − 10 年期国债收益率，直接看数字，单位是百分点。国债收益率取中债 10 年期到期收益率（东财数据中心）。利差越大，说明「拿这份现金分红」相对无风险利率越划算（卡片上标绿）；负利差意味着分红还不如存国债（标红）。<b>它参与红利类的档位调整</b>：≥4 升一档、&lt;2 降一档。分红的确定性、红利税和 QDII 的汇率都没折算进去，港股那只是税前口径。</p>' +
       '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。卡片、数据页、详情面板用同一套配色：溢价为正标红（你在多付钱），为负标绿（折价），±0.1% 以内算平。</p>' +
       '<p><b>温度条</b>：红利类卡片画的是股息率分位，左端红=分位最低（最贵）、右端绿=分位最高（最便宜），指针位置就是那个百分数；美股类卡片画的是 PE 分位，左端绿=便宜、右端红=贵。</p>' +
+      '<p><b>分位是实时的</b>：股息率 = 近 12 个月分红 ÷ 现价，所以价格每变一次，股息率和股息率分位都会当场重算（刻度（一年最低 / 最高股息率）每天凌晨由脚本更新）。美股类的 PE 分位仍按每日估值更新，盘中不变。</p>' +
       '<h3>买入建议怎么来的</h3>' +
       '<p><b>三个红利 ETF</b>（中证红利、港股红利、低波红利）只看两个指标：① <b>股息率分位</b>——近 1 年里股息率排第几，越高说明价格越便宜；② <b>股息利差</b>——股息率减去 10 年期国债收益率。档位先由股息率分位定（≥80% 便宜、60–80% 偏低、40–60% 适中、20–40% 偏高、<20% 偏贵），再看利差：利差 ≥ 4 个百分点升一档（更便宜），< 2 个百分点降一档。</p>' +
       '<p><b>两个美股 ETF</b>（纳指、标普）看 PE 分位和场内溢价：PE 分位定基础档（<20% 便宜 … ≥80% 偏贵），溢价超过 2% 降一档、超过 5% 直接归为「偏贵 · 暂停买入」。</p>' +
@@ -447,7 +455,7 @@
     var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
     var y10txt = m.y10 == null ? '—' : num(m.y10, 2) + '%' + (DATA.treasury && DATA.treasury.date ? '（' + DATA.treasury.date + '）' : '');
     var kvRows = m.isDiv ? [
-      ['股息率分位（1 年）', pctText(e.dyPct) + (e.dyLow == null ? '' : '（1 年 P25–最高 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
+      ['股息率分位（1 年）', pctText(m.dyPct) + (e.dyLow == null ? '' : '（1 年最低–最高 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
       ['股息率', dyText(m.dy)],
       ['股息利差', m.spread == null ? '—' : signed(m.spread, 2), m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')],
       ['10 年国债', y10txt],
@@ -475,7 +483,7 @@
     }).join('');
 
     var reasons = m.isDiv ? [
-      '股息率分位 ' + pctText(e.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在过去 1 年里排第几（下端切掉 P25 以下的假谷，上端到一年最高值），越高越便宜',
+      '股息率分位 ' + pctText(m.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在过去 1 年里排第几（从一年最低到最高，纯按价格算），越高越便宜',
       m.spread == null ? '股息利差缺失' : '股息利差 ' + signed(m.spread, 2) + '（' + num(m.dy, 2) + '% − 10 年国债 ' + num(m.y10, 2) + '%）' +
         (m.spread >= 4 ? '，高利差把档位抬了一档' : (m.spread < 2 ? '，利差偏薄把档位降了一档' : '，利差在中位，不调整档位')),
       '结论：' + L.label + ' · ' + L.action
@@ -495,7 +503,7 @@
       '<span class="sheet__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
       '<span class="etf__time">' + quoteLabel(m.ts) + '</span></div>' +
       '<div class="sheet__brief"><span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span> ' + esc(adviceOf(m)) + '</div>' +
-      tempBar(m.isDiv ? e.dyPct : e.pePct, m.isDiv ? 'div' : '') +
+      tempBar(m.isDiv ? m.dyPct : e.pePct, m.isDiv ? 'div' : '') +
       '<div class="kv">' + kv + '</div>' +
       '<div class="chart"><div class="chart__cap"><span>' + esc(e.indexName) + ' PE 走势</span><span>来源：' + esc(e.valNote || '--') + '</span></div>' +
         chartSVG(e.history, LV_COLOR[m.level]) + '</div>' +
