@@ -112,13 +112,6 @@
     return 4;
   }
 
-  function adjustLevel(lv, premium) {
-    if (premium == null || !isFinite(premium)) return lv;
-    if (premium > 5) return 4;
-    if (premium > 2) return Math.min(4, lv + 1);
-    return lv;
-  }
-
   function quoteOf(code) { return state.quotes[code]; }
 
   function iopvOf(etf, q) {
@@ -139,10 +132,6 @@
     var dy = (etf.ttmDiv != null && price)
       ? (etf.ttmDiv / price) * 100
       : etf.dy;
-    var y10 = (DATA.treasury && DATA.treasury.y10 != null) ? DATA.treasury.y10 : null;
-    var y5 = (DATA.treasury && DATA.treasury.y5 != null) ? DATA.treasury.y5 : null;
-    // 利差按 10 年期国债算
-    var spread = (dy != null && dy > 0 && y10 != null) ? dy - y10 : null;
     var isDiv = etf.family !== 'us';
     // 实时股息率分位：刻度（P25 与一年最高）每天由脚本烤入，分子换成浏览器现算的实时股息率，
     // 这样盘中价格一动，分位与温度条就跟着动，不会出现「股息率变了、分位没变」。
@@ -151,25 +140,17 @@
       dyPct = Math.max(0, Math.min(100, (dy - etf.dyLow) / (etf.dyHigh - etf.dyLow) * 100));
       dyPct = Math.round(dyPct * 10) / 10;
     }
-    var base, level;
-    if (isDiv) {
-      // 红利类：看「近 1 年股息率分位」（越高越便宜），再用与 10 年国债的利差修正一档
-      base = invertLevel(dyPct);
-      level = base;
-      if (spread != null) {
-        if (spread >= 4) level = Math.max(0, level - 1);
-        else if (spread < 2) level = Math.min(4, level + 1);
-      }
-    } else {
-      // 美股 QDII：看 PE 分位，再用场内溢价修正
-      base = levelOf(etf.pePct);
-      level = adjustLevel(base, premium);
+    // 溢价分位（美股）：刻度（一年最低 / 最高溢价）由脚本烤入，分子换成实时溢价
+    var premPct = etf.premPct;
+    if (!isDiv && premium != null && etf.premLow != null && etf.premHigh != null && etf.premHigh > etf.premLow) {
+      premPct = Math.max(0, Math.min(100, ((premium - etf.premLow) / (etf.premHigh - etf.premLow)) * 100));
+      premPct = Math.round(premPct * 10) / 10;
     }
-    var scorePct = isDiv ? (dyPct == null ? 50 : 100 - dyPct) : etf.pePct;
+    // 红利：股息率分位越高越便宜；美股：溢价分位越高越贵
+    var base = isDiv ? invertLevel(dyPct) : levelOf(premPct);
     return {
       etf: etf, price: price, chg: chg, ts: ts, iopv: iopv, premium: premium,
-      base: base, level: level, digits: 3, dy: dy, y5: y5, y10: y10,
-      spread: spread, isDiv: isDiv, scorePct: scorePct, dyPct: dyPct, dyPctLive: dyPct !== etf.dyPct
+      base: base, level: base, digits: 3, dy: dy, dyPct: dyPct, premPct: premPct, isDiv: isDiv
     };
   }
 
@@ -179,17 +160,6 @@
 
   function dyText(v) {
     return (v == null || v === 0) ? '—' : num(v, 2) + '%';
-  }
-
-  // 股息利差 = 股息率 − 10 年期国债收益率，单位是百分点。
-  // 现在直接排在卡片第一行指标里（跟股息率分位同一行），不再单独占一行。
-  function spreadStat(m) {
-    if (m.spread == null) {
-      return '<div class="etf__stat"><i>股息利差</i><b class="is-na">—</b></div>';
-    }
-    var tone = m.spread > 0 ? 'is-down' : 'is-up'; // 利差大=划算=绿，利差薄=红
-    return '<div class="etf__stat"><i>股息利差</i>' +
-      '<b class="' + tone + '">' + signed(m.spread, 2) + '</b></div>';
   }
 
   // 溢价配色：正溢价标红（多付钱）、负溢价标绿（折价），±0.1% 以内算中性。
@@ -203,89 +173,10 @@
 
   function adviceOf(m) {
     var L = LEVELS[m.level];
-    if (m.isDiv) {
-      if (m.spread != null && m.level !== m.base) {
-        return m.level < m.base
-          ? '股息利差 ' + signed(m.spread, 1) + '，仍算划算，可多买一点'
-          : '股息利差只剩 ' + signed(m.spread, 1) + '，比国债多不了多少，先收手';
-      }
-      return L.desc;
-    }
-    if (m.premium != null && m.premium > 2 && m.level !== m.base) {
+    if (!m.isDiv && m.premium != null && m.premium > 2) {
       return '场内溢价 ' + num(m.premium, 1) + '%，等溢价收敛再买';
     }
     return L.desc;
-  }
-
-  /* ---------------- 图形 ---------------- */
-
-  function sparkSVG(hist, color) {
-    var pts = (hist || []).filter(function (p) { return p && p.length === 2 && isFinite(p[1]); }).slice(-260);
-    if (pts.length < 3) return '';
-    var W = 300, H = 40;
-    var xs = pts.map(function (p) { return p[0]; });
-    var ys = pts.map(function (p) { return p[1]; });
-    var x0 = xs[0], x1 = xs[xs.length - 1];
-    var y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
-    if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
-    var sx = function (v) { return 2 + ((v - x0) / (x1 - x0 || 1)) * (W - 4); };
-    var sy = function (v) { return H - 4 - ((v - y0) / (y1 - y0)) * (H - 8); };
-    var d = pts.map(function (p, i) {
-      return (i ? 'L' : 'M') + sx(p[0]).toFixed(1) + ',' + sy(p[1]).toFixed(1);
-    }).join(' ');
-    var area = d + ' L' + sx(x1).toFixed(1) + ',' + H + ' L' + sx(x0).toFixed(1) + ',' + H + ' Z';
-    var last = pts[pts.length - 1];
-    return '<svg class="etf__spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
-      '<path d="' + area + '" fill="' + color + '" opacity="0.10"></path>' +
-      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></path>' +
-      '<circle cx="' + sx(last[0]).toFixed(1) + '" cy="' + sy(last[1]).toFixed(1) + '" r="2.4" fill="' + color + '"></circle>' +
-      '</svg>';
-  }
-
-  function chartSVG(hist, color) {
-    var pts = (hist || []).filter(function (p) { return p && p.length === 2 && isFinite(p[1]); }).slice(-260);
-    if (pts.length < 3) return '<p class="fine">暂无估值曲线</p>';
-    var W = 320, H = 160, PL = 30, PR = 10, PT = 12, PB = 20;
-    var xs = pts.map(function (p) { return p[0]; });
-    var ys = pts.map(function (p) { return p[1]; });
-    var x0 = xs[0], x1 = xs[xs.length - 1];
-    var y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
-    var pad = (y1 - y0) * 0.1 || 1;
-    var lo = y0 - pad, hi = y1 + pad;
-    var sx = function (v) { return PL + ((v - x0) / (x1 - x0 || 1)) * (W - PL - PR); };
-    var sy = function (v) { return PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB); };
-    var d = pts.map(function (p, i) {
-      return (i ? 'L' : 'M') + sx(p[0]).toFixed(1) + ',' + sy(p[1]).toFixed(1);
-    }).join(' ');
-    var area = d + ' L' + sx(x1).toFixed(1) + ',' + (H - PB) + ' L' + sx(x0).toFixed(1) + ',' + (H - PB) + ' Z';
-    var rows = [hi, (lo + hi) / 2, lo].map(function (v) {
-      return '<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + sy(v).toFixed(1) + '" y2="' + sy(v).toFixed(1) +
-        '" stroke="currentColor" stroke-opacity="0.12" stroke-width="1" stroke-dasharray="3 4"></line>' +
-        '<text x="' + (PL - 4) + '" y="' + (sy(v) + 3).toFixed(1) + '" text-anchor="end" font-size="8" fill="currentColor" fill-opacity="0.55">' +
-        num(v, v >= 100 ? 0 : 1) + '</text>';
-    }).join('');
-    var last = pts[pts.length - 1];
-    var xa = ym(x0), xb = ym(x1);
-    return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="auto" role="img">' + rows +
-      '<path d="' + area + '" fill="' + color + '" opacity="0.10"></path>' +
-      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></path>' +
-      '<circle cx="' + sx(last[0]).toFixed(1) + '" cy="' + sy(last[1]).toFixed(1) + '" r="3" fill="' + color + '"></circle>' +
-      '<text x="' + PL + '" y="' + (H - 6) + '" font-size="8" fill="currentColor" fill-opacity="0.55">' + xa + '</text>' +
-      '<text x="' + (W - PR) + '" y="' + (H - 6) + '" text-anchor="end" font-size="8" fill="currentColor" fill-opacity="0.55">' + xb + '</text>' +
-      '</svg>';
-  }
-
-  var LV_COLOR = { 0: '#12a15a', 1: '#7dbb3f', 2: '#d9a10b', 3: '#ef7d21', 4: '#e5484d' };
-
-  // 温度条：红利类直接画「股息率分位」（0 = 分位最低 = 贵，100 = 分位最高 = 便宜，
-  // 所以刻度从右到左反过来、配色也反过来）；美股类画 PE 分位（0 = 便宜，100 = 贵）。
-  function tempBar(pct, kind) {
-    var p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-    var div = kind === 'div';
-    return '<div class="temp' + (div ? ' temp--div' : '') + '">' +
-      '<div class="temp__track"><span class="temp__marker" style="left:' + p.toFixed(1) + '%"></span></div>' +
-      '<div class="temp__scale"><span>' + (div ? '0 贵' : '0 便宜') + '</span><span>50 中位</span><span>' + (div ? '100 便宜' : '100 贵') + '</span></div>' +
-      '</div>';
   }
 
   /* ---------------- 卡片 ---------------- */
@@ -295,6 +186,20 @@
     if (st === 'open') return hm(ts);
     if (st === 'break') return '午休';
     return '收盘';
+  }
+
+  // 温度条：指针就是分位。红利类画股息率分位（0 = 分位最低 = 最贵，100 = 最便宜，
+  // 所以轨道用红→绿）；美股类画溢价分位（0 = 溢价比平时低 = 便宜，绿→红）。
+  function tempBar(pct, kind) {
+    var v = (pct == null || !isFinite(pct)) ? 50 : Math.max(0, Math.min(100, pct));
+    var cls = kind === 'div' ? 'temp temp--div' : 'temp';
+    return '<div class="' + cls + '">' +
+      '<div class="temp__track"><span class="temp__marker" style="left:' + v.toFixed(1) + '%"></span></div>' +
+      '<div class="temp__scale">' +
+        (kind === 'div'
+          ? '<span>0 贵</span><span>50 中位</span><span>100 便宜</span>'
+          : '<span>0 便宜</span><span>50 中位</span><span>100 贵</span>') +
+      '</div></div>';
   }
 
   function cardHTML(m) {
@@ -314,16 +219,14 @@
         '<span class="etf__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
         '<span class="etf__time">' + quoteLabel(m.ts) + '</span>' +
       '</div>' +
-      '<div class="etf__stats' + (m.isDiv ? '' : ' etf__stats--2') + '">' +
+      '<div class="etf__stats etf__stats--2">' +
         (m.isDiv
           ? '<div class="etf__stat"><i>股息率</i><b' + (m.dy == null || m.dy === 0 ? ' class="is-na"' : '') + '>' + dyText(m.dy) + '</b></div>' +
-            '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(m.dyPct) + '</b></div>' +
-            spreadStat(m)
-          : '<div class="etf__stat"><i>PE 分位</i><b>' + pctText(e.pePct) + '</b></div>' +
-            '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>') +
+            '<div class="etf__stat"><i>股息率分位（1年）</i><b>' + pctText(m.dyPct) + '</b></div>'
+          : '<div class="etf__stat"><i>场内溢价</i><b class="' + premCls + '">' + (prem == null ? '—' : signed(prem, 1)) + '</b></div>' +
+            '<div class="etf__stat"><i>溢价分位（1年）</i><b>' + pctText(m.premPct) + '</b></div>') +
       '</div>' +
-      tempBar(m.isDiv ? m.dyPct : e.pePct, m.isDiv ? 'div' : '') +
-      sparkSVG(e.history, LV_COLOR[m.level]) +
+      tempBar(m.isDiv ? m.dyPct : m.premPct, m.isDiv ? 'div' : '') +
       '<div class="etf__foot">' +
         '<span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span>' +
         '<span class="etf__adv">' + esc(adviceOf(m)) + '</span>' +
@@ -347,27 +250,12 @@
     var names = { 0: '便宜', 1: '偏低', 2: '适中', 3: '偏高', 4: '偏贵' };
     var parts = [];
     for (var i = 0; i < 5; i++) if (counts[i]) parts.push(counts[i] + ' 只' + names[i]);
-    var text = '红利类看「股息率分位 + 股息利差」，美股看「PE 分位 + 溢价」：' +
+    var text = '红利看「股息率分位」，美股看「溢价」：' +
       (parts.length ? parts.join('、') : '数据加载中') + '。';
-    var usDown = ms.filter(function (m) { return !m.isDiv && m.level > m.base && m.premium != null && m.premium > 2; });
-    if (usDown.length) {
-      text += '其中' +
-        usDown.map(function (m) { return m.etf.name + '（溢价 ' + signed(m.premium, 1) + '）'; }).join('、') +
-        ' 场内价明显高于净值，已按「偏贵」处理——同样的资产要多付钱，先别追高。';
-    }
-    var divAdj = ms.filter(function (m) { return m.isDiv && m.level !== m.base && m.spread != null; });
-    if (divAdj.length) {
-      text += divAdj.map(function (m) {
-        return m.etf.name + ' 股息利差 ' + signed(m.spread, 1) + '，' +
-          (m.level < m.base ? '把档位抬高了一档。' : '偏薄，把档位下调了一档。');
-      }).join('');
-    }
-    if (!usDown.length && !divAdj.length) {
-      var cheap = ms.filter(function (m) { return m.level <= 1; });
-      text += cheap.length
-        ? cheap.map(function (m) { return m.etf.name; }).join('、') + ' 目前算便宜或偏低，可以多买一点。'
-        : '五只都谈不上便宜，按档位看就行。';
-    }
+    var cheap = ms.filter(function (m) { return m.level <= 1; });
+    var rich = ms.filter(function (m) { return m.level >= 3; });
+    if (cheap.length) text += cheap.map(function (m) { return m.etf.name; }).join('、') + ' 相对便宜，可以多买一点。';
+    if (rich.length) text += rich.map(function (m) { return m.etf.name; }).join('、') + ' 偏贵，先别追。';
 
     var st = sessionState();
     var dotCls = st === 'open' ? 'is-live' : (st === 'break' ? 'is-break' : '');
@@ -381,7 +269,7 @@
 
     $('#cardGrid').innerHTML = ms.map(cardHTML).join('');
     $('#homeMeta').textContent = ms.length + ' 只 · 点开看明细';
-    $('#homeNote').textContent = '红利类：股息率分位越高越便宜，股息利差 = 股息率 − 10 年国债；美股：PE 分位越低越便宜，溢价超过 2% 降档、5% 直接归为偏贵。颜色越红代表越贵。';
+    $('#homeNote').textContent = '红利类看股息率分位（越高越便宜），美股看场内溢价（越高越贵）。颜色越红代表越贵，温度条指针就是那个分位。';
     $('#dataDate').textContent = '行情 ' + (quoteStamp() ? md(quoteStamp()) : '--') +
       ' · 估值 ' + (genTs ? md(genTs) : '--');
   }
@@ -394,35 +282,25 @@
       var bits = (m.isDiv ? [
         '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
         '股息率 <b>' + dyText(m.dy) + '</b>',
-        '股息率分位 <b>' + pctText(m.dyPct) + '</b>',
-        '股息利差 <b class="' + (m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')) + '">' + (m.spread == null ? '—' : signed(m.spread, 2)) + '</b>',
-        '10 年国债 <b>' + (m.y10 == null ? '—' : num(m.y10, 2) + '%') + '</b>',
-        'PE 分位 <b>' + pctText(e.pePct) + '</b>',
-        '价格分位 <b>' + pctText(e.pricePct) + '</b>',
-        '估值日 ' + esc((e.valDate || '--').slice(5))
+        '股息率分位 <b>' + pctText(m.dyPct) + '</b>（' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）'
       ] : [
         '净值 <b>' + num(e.nav, 4) + '</b>（' + esc(e.navDate || '--') + '）',
-        'PE <b>' + num(e.pe, 2) + '</b>',
-        'PE 分位 <b>' + pctText(e.pePct) + '</b>',
-        'PB 分位 <b>' + pctText(e.pbPct) + '</b>',
-        '价格分位 <b>' + pctText(e.pricePct) + '</b>',
-        '综合 <b>' + pctText(e.composite) + '</b>',
-        '估值日 ' + esc((e.valDate || '--').slice(5))
+        '场内溢价 <b class="' + premTone(m.premium) + '">' + signed(m.premium, 2) + '</b>',
+        '溢价分位 <b>' + pctText(m.premPct) + '</b>（' + signed(e.premLow, 1) + '–' + signed(e.premHigh, 1) + '）'
       ]).map(function (s) { return '<span class="datarow__bit">' + s + '</span>'; });
       return '<div class="datarow">' +
         '<div class="datarow__top"><span class="datarow__name">' + esc(e.name) + ' ' + esc(e.code) + '</span>' +
         '<span class="pill ' + LEVELS[m.level].cls + '">' + LEVELS[m.level].label + '</span></div>' +
         '<div class="datarow__meta">' + bits.join('<span class="datarow__sep"> · </span>') +
         '<span class="datarow__sep"> · </span><span class="datarow__bit">估算净值 ' + num(m.iopv, 4) + '</span>' +
-        '<span class="datarow__sep"> · </span>' +
-        '<span class="datarow__bit">溢价 <b class="' + premTone(m.premium) + '">' + signed(m.premium, 2) + '</b></span><br>' +
-        '<span class="datarow__bit">' + esc(e.valNote || '') + '</span></div>' +
+        '' +
+        '<span class="datarow__sep"> · </span><span class="datarow__bit">近 12 月分红 ' + (e.ttmDiv == null ? '—' : num(e.ttmDiv, 4)) + '</span></div>' +
         '</div>';
     }).join('');
     $('#dataUpdated').textContent = DATA.generatedAt || '';
     $('#dataStatusText').textContent =
-      '数据源：' + (DATA.source || '--') + '。行情、IOPV 由浏览器直连腾讯财经，估值与净值每日早上由 GitHub Actions 重新生成；' +
-      '股息率按这只 ETF 近 12 个月的实际分红 ÷ 现价计算，不分红的显示「—」；综合分位是 PE 分位、PB 分位、价格分位三者的平均，只在详情面板作参考。红利类按「股息率分位 + 股息利差」定档，美股类按「PE 分位 + 溢价」定档。';
+      '数据源：' + (DATA.source || '--') + '。行情、IOPV 由浏览器直连腾讯财经，净值与分红每日早上由 GitHub Actions 重新生成；' +
+      '股息率按这只 ETF 近 12 个月的实际分红 ÷ 现价计算，不分红的显示「—」。红利类按股息率分位定档，美股类按溢价分位定档。';
   }
 
   /* ---------------- 说明页 ---------------- */
@@ -430,20 +308,16 @@
   function renderAbout() {
     $('#aboutProse').innerHTML =
       '<p><b>价格</b>：ETF 场内成交价，交易日 9:15–11:30、13:00–15:00 每 20 秒刷新一次。</p>' +
-      '<p><b>PE 分位 / PB 分位</b>：当前市盈率、市净率在过去 5 年里的位置，0% 最便宜、100% 最贵。分位低只说明「相对自己便宜」，不代表绝对安全。</p>' +
-      '<p><b>价格分位</b>：指数最新收盘价在过去 5 年（约 1250 个交易日）里排第几。它只跟价格有关，不看盈利，用来对照 PE 分位。</p>' +
-      '<p><b>综合分位</b>：PE 分位、PB 分位、价格分位三者的平均，只在详情面板里作参考，不参与打分。513530 的指数没有免费 PB 数据，只取另外两个。</p>' +
       '<p><b>股息率</b>：这只 ETF 近 12 个月实际每份分红合计 ÷ 现价，不是指数的估算股息率。分红记录来自天天基金「分红送配」，没分过红的显示「—」。</p>' +
-      '<p><b>股息利差</b>：股息率 − 10 年期国债收益率，直接看数字，单位是百分点。国债收益率取中债 10 年期到期收益率（东财数据中心）。利差越大，说明「拿这份现金分红」相对无风险利率越划算（卡片上标绿）；负利差意味着分红还不如存国债（标红）。<b>它参与红利类的档位调整</b>：≥4 升一档、&lt;2 降一档。分红的确定性、红利税和 QDII 的汇率都没折算进去，港股那只是税前口径。</p>' +
-      '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价高说明你在为同样的资产多付钱。卡片、数据页、详情面板用同一套配色：溢价为正标红（你在多付钱），为负标绿（折价），±0.1% 以内算平。</p>' +
-      '<p><b>温度条</b>：红利类卡片画的是股息率分位，左端红=分位最低（最贵）、右端绿=分位最高（最便宜），指针位置就是那个百分数；美股类卡片画的是 PE 分位，左端绿=便宜、右端红=贵。</p>' +
-      '<p><b>分位是实时的</b>：股息率 = 近 12 个月分红 ÷ 现价，所以价格每变一次，股息率和股息率分位都会当场重算（刻度（一年最低 / 最高股息率）每天凌晨由脚本更新）。美股类的 PE 分位仍按每日估值更新，盘中不变。</p>' +
+      '<p><b>股息率分位</b>：把过去 1 年里每天的股息率排个队，看今天的股息率排在什么位置（0% = 一年里最低，100% = 一年里最高）。分位越高说明价格相对分红越便宜。刻度取一年内的最低值与最高值，价格一变分位当场重算。</p>' +
+      '<p><b>场内溢价</b>：场内价 ÷ 估算净值 − 1。参考净值优先取交易所实时 IOPV；QDII 用「净值 × 指数涨跌 × 汇率」折算。溢价为正说明你在为同样的资产多付钱（标红），为负是折价（标绿）。</p>' +
+      '<p><b>溢价分位</b>：过去 1 年每天的场内溢价排个队，看今天的溢价排在什么位置。分位越高说明现在买比平时更贵。</p>' +
+      '<p><b>温度条</b>：指针就是上面那个分位。红利类卡片画股息率分位——左端红（分位低、最贵）、右端绿（分位高、最便宜）；美股类卡片画溢价分位——左端绿（溢价低、便宜）、右端红（溢价高、贵）。</p>' +
       '<h3>买入建议怎么来的</h3>' +
-      '<p><b>三个红利 ETF</b>（中证红利、港股红利、低波红利）只看两个指标：① <b>股息率分位</b>——近 1 年里股息率排第几，越高说明价格越便宜；② <b>股息利差</b>——股息率减去 10 年期国债收益率。档位先由股息率分位定（≥80% 便宜、60–80% 偏低、40–60% 适中、20–40% 偏高、<20% 偏贵），再看利差：利差 ≥ 4 个百分点升一档（更便宜），< 2 个百分点降一档。</p>' +
-      '<p><b>两个美股 ETF</b>（纳指、标普）看 PE 分位和场内溢价：PE 分位定基础档（<20% 便宜 … ≥80% 偏贵），溢价超过 2% 降一档、超过 5% 直接归为「偏贵 · 暂停买入」。</p>' +
-      '<p>PE 分位、PB 分位、价格分位、综合分位这些仍然在详情面板里作为参考显示，不参与红利类的打分。</p>' +
-'<h3>数据与更新</h3>' +
-      '<p>估值、净值、股息率每天由 GitHub Actions 跑 <code>node fetch-data.mjs</code> 写进 <code>data.js</code>；行情是浏览器实时拉的。想手动更新，在仓库里跑 <code>node fetch-data.mjs</code> 再提交即可。</p>' +
+      '<p><b>三个红利 ETF</b>（中证红利、港股红利、低波红利）只看股息率分位：≥80% 便宜、60–80% 偏低、40–60% 适中、20–40% 偏高、&lt;20% 偏贵。</p>' +
+      '<p><b>两个美股 ETF</b>（纳指、标普）只看溢价分位，切分点相同。</p>' +
+      '<h3>数据与更新</h3>' +
+      '<p>净值、分红每天由 GitHub Actions 跑 <code>node fetch-data.mjs</code> 写进 <code>data.js</code>；行情与 IOPV 是浏览器实时拉的。想手动更新，在仓库里跑 <code>node fetch-data.mjs</code> 再提交即可。</p>' +
       '<p><b>装到桌面</b>：iPhone 用 Safari 打开后点「分享」→「添加到主屏幕」；安卓和电脑 Chrome 用地址栏右侧的安装图标。装好后从图标进入，全屏显示，最近一次数据离线也能看。</p>' +
       '<p class="fine">本页仅为个人研究记录，不构成投资建议。数据来自公开接口，可能延迟、缺失或有误；ETF 有跟踪误差、汇率与限购风险，决策请自行核实。</p>';
   }
@@ -453,43 +327,27 @@
   function sheetHTML(m) {
     var e = m.etf, L = LEVELS[m.level];
     var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
-    var y10txt = m.y10 == null ? '—' : num(m.y10, 2) + '%' + (DATA.treasury && DATA.treasury.date ? '（' + DATA.treasury.date + '）' : '');
     var kvRows = m.isDiv ? [
-      ['股息率分位（1 年）', pctText(m.dyPct) + (e.dyLow == null ? '' : '（1 年最低–最高 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
+      ['股息率分位（1 年）', pctText(m.dyPct) + (e.dyLow == null ? '' : '（一年最低–最高 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
       ['股息率', dyText(m.dy)],
-      ['股息利差', m.spread == null ? '—' : signed(m.spread, 2), m.spread == null ? 'is-na' : (m.spread > 0 ? 'is-down' : 'is-up')],
-      ['10 年国债', y10txt],
-      ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
-      ['估算净值', num(m.iopv, 4)],
       ['近 12 月分红', e.ttmDiv == null ? '—' : num(e.ttmDiv, 4) + ' 元/份'],
-      ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')],
-      ['参考：PE 分位', pctText(e.pePct) + (e.pe == null ? '' : '，PE ' + num(e.pe, 2))],
-      ['参考：PB 分位', pctText(e.pbPct) + (e.pb == null ? '' : '，PB ' + num(e.pb, 2))],
-      ['参考：价格分位', pctText(e.pricePct) + (e.pxLow == null ? '' : '（5 年 ' + num(e.pxLow, 0) + '–' + num(e.pxHigh, 0) + '）')],
-      ['估值日', e.valDate || '—']
-    ] : [
-      ['PE 分位', pctText(e.pePct) + (e.pe == null ? '' : '，PE ' + num(e.pe, 2))],
-      ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
-      ['PB 分位', pctText(e.pbPct) + (e.pb == null ? '' : '，PB ' + num(e.pb, 2))],
-      ['价格分位', pctText(e.pricePct) + (e.pxLow == null ? '' : '（5 年区间 ' + num(e.pxLow, 0) + '–' + num(e.pxHigh, 0) + '）')],
-      ['综合分位', pctText(e.composite)],
       ['估算净值', num(m.iopv, 4)],
-      ['股息率', dyText(m.dy)],
-      ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')],
-      ['估值日', e.valDate || '—']
+      ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')]
+    ] : [
+      ['溢价分位（1 年）', pctText(m.premPct) + (e.premLow == null ? '' : '（一年最低–最高 ' + signed(e.premLow, 1) + '–' + signed(e.premHigh, 1) + '）')],
+      ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
+      ['估算净值', num(m.iopv, 4)],
+      ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')]
     ];
     var kv = kvRows.map(function (row) {
       return '<div class="kv__row"><span class="kv__k">' + row[0] + '</span><span class="kv__v ' + (row[2] || '') + '">' + esc(row[1]) + '</span></div>';
     }).join('');
 
     var reasons = m.isDiv ? [
-      '股息率分位 ' + pctText(m.dyPct) + '：股息率 ' + dyText(m.dy) + ' 在过去 1 年里排第几（从一年最低到最高，纯按价格算），越高越便宜',
-      m.spread == null ? '股息利差缺失' : '股息利差 ' + signed(m.spread, 2) + '（' + num(m.dy, 2) + '% − 10 年国债 ' + num(m.y10, 2) + '%）' +
-        (m.spread >= 4 ? '，高利差把档位抬了一档' : (m.spread < 2 ? '，利差偏薄把档位降了一档' : '，利差在中位，不调整档位')),
+      '股息率 ' + dyText(m.dy) + '，在近 1 年里排 ' + pctText(m.dyPct) + '（越低越贵）',
       '结论：' + L.label + ' · ' + L.action
     ] : [
-      'PE 分位 ' + pctText(e.pePct) + (e.pe == null ? '' : '（PE ' + num(e.pe, 2) + '）') + '，决定基础档位',
-      m.premium == null ? '溢价数据缺失' : '场内溢价 ' + signed(m.premium, 2) + (m.level > m.base ? '，超过阈值已降档' : '，未触发降档'),
+      '场内溢价 ' + signed(m.premium, 1) + '，在近 1 年里排 ' + pctText(m.premPct) + '（越高越贵）',
       '结论：' + L.label + ' · ' + L.action
     ];
 
@@ -503,10 +361,8 @@
       '<span class="sheet__chg ' + chgCls + '">' + signed(m.chg) + '</span>' +
       '<span class="etf__time">' + quoteLabel(m.ts) + '</span></div>' +
       '<div class="sheet__brief"><span class="pill ' + L.cls + '">' + L.label + ' · ' + L.action + '</span> ' + esc(adviceOf(m)) + '</div>' +
-      tempBar(m.isDiv ? m.dyPct : e.pePct, m.isDiv ? 'div' : '') +
+      tempBar(m.isDiv ? m.dyPct : m.premPct, m.isDiv ? 'div' : '') +
       '<div class="kv">' + kv + '</div>' +
-      '<div class="chart"><div class="chart__cap"><span>' + esc(e.indexName) + ' PE 走势</span><span>来源：' + esc(e.valNote || '--') + '</span></div>' +
-        chartSVG(e.history, LV_COLOR[m.level]) + '</div>' +
       '<ul class="reasons">' + reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>' +
       '<p class="fine" style="margin-top:14px">溢价按实时 IOPV（交易所参考净值）估算，QDII 会受汇率与时差影响；本页不构成投资建议。</p>';
   }

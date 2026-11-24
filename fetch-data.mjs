@@ -1,19 +1,21 @@
-/**
- * 五只 ETF 跟踪数据生成器
+﻿/**
+ * 五只 ETF 跟踪数据生成器（精简版）
  *
  * 运行： node fetch-data.mjs
  * 依赖： Node 18+（内置 fetch），无需 npm install
  *
  * 输出： data.js（window.ETF_DATA）
  *
+ * 只保留两类指标：
+ *  - 红利三只：近 12 个月实际分红算出的股息率 + 近 1 年股息率分位
+ *  - 美股两只：场内溢价 + 近 1 年溢价分位
+ *
  * 数据来源：
- *  - 实时/收盘行情：东方财富 push2（ETF 价格、涨跌）
- *  - 净值：天天基金 f10/lsjz（最新单位净值，用于估算溢价）
- *  - 指数估值：
- *      · 中证红利 000922 / 红利低波 H30269 / 纳指100 NDX / 标普500 SP500 → 蛋卷基金（PE/PB/股息率/分位）
- *      · 港股通高股息 930914 → 中证指数官网 indexCsiDsPe（逐日 PE，自己算 5 年分位；无 PB、无双股息率）
- *  - 美股指数日线：东方财富 kline（100.NDX / 100.SPX），用于估算 QDII 的公允净值
- *  - 离岸人民币：东方财富 kline（133.USDCNH），用于 QDII 汇率修正
+ *  - 行情 / 日线：东方财富 push2
+ *  - 净值：天天基金 f10/lsjz
+ *  - 分红：天天基金 f10 分红送配页
+ *  - 美股指数日线：东方财富 kline（100.NDX100 / 100.SPX），用于折算 QDII 公允净值
+ *  - 离岸人民币：东方财富 kline（133.USDCNH）
  */
 
 import { writeFileSync } from 'node:fs';
@@ -39,8 +41,6 @@ const ETFS = [
     family: 'dividend',
     secid: '1.515080',
     indexSecid: '1.000922',
-    valSource: 'danjuan',
-    valKey: 'SH000922',
     iopvMode: 'index',
   },
   {
@@ -50,11 +50,9 @@ const ETFS = [
     indexCode: '930914',
     indexName: '港股通高股息',
     market: 'HK',
-    family: 'hkDividend',
+    family: 'dividend',
     secid: '1.513530',
     indexSecid: '2.930914',
-    valSource: 'csindex',
-    valKey: '930914',
     iopvMode: 'index',
   },
   {
@@ -67,27 +65,23 @@ const ETFS = [
     family: 'dividend',
     secid: '1.563020',
     indexSecid: '2.H30269',
-    valSource: 'danjuan',
-    valKey: 'CSIH30269',
     iopvMode: 'index',
   },
   {
     code: '513100',
-    name: '纳指',
+    name: '纳指100',
     fullName: '国泰纳斯达克100ETF(QDII)',
     indexCode: 'NDX',
     indexName: '纳指100',
     market: 'US',
     family: 'us',
     secid: '1.513100',
-    indexSecid: '100.NDX',
-    valSource: 'danjuan',
-    valKey: 'NDX',
+    indexSecid: '100.NDX100',
     iopvMode: 'fair',
   },
   {
     code: '513650',
-    name: '标普',
+    name: '标普500',
     fullName: '南方标普500ETF(QDII)',
     indexCode: 'SP500',
     indexName: '标普500',
@@ -95,14 +89,11 @@ const ETFS = [
     family: 'us',
     secid: '1.513650',
     indexSecid: '100.SPX',
-    valSource: 'danjuan',
-    valKey: 'SP500',
     iopvMode: 'fair',
   },
 ];
 
 const round = (v, n = 2) => (v == null || Number.isNaN(v) ? null : Math.round(v * 10 ** n) / 10 ** n);
-const toPct = (v) => (v == null ? null : round(v * 100, 1));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function getText(url, headers = {}) {
@@ -120,7 +111,6 @@ const getJSON = async (url, headers) => JSON.parse(await getText(url, headers));
 
 /* ---------------- 行情 ---------------- */
 
-/** 批量行情：返回 { code: { price, changePct, change, quoteTime, name, digits } } */
 async function emQuotes(secids) {
   const url =
     `https://push2.eastmoney.com/api/qt/ulist.np/get?secids=${secids.join(',')}` +
@@ -132,7 +122,6 @@ async function emQuotes(secids) {
     out[d.f12] = {
       name: d.f14,
       price: round(d.f2 / 10 ** digits, digits),
-      change: round(d.f4 / 10 ** digits, digits),
       changePct: round(d.f3 / 100, 2),
       quoteTime: d.f124 ? new Date(d.f124 * 1000) : null,
     };
@@ -152,167 +141,6 @@ async function emKline(secid, lmt = 20, fqt = 1) {
   });
 }
 
-/* ---------------- 股息率分位 ---------------- */
-
-/**
- * 近 1 年股息率分位：分红金额固定（用「最近 12 个月每份分红合计」这一个数），
- * 逐日只换分母（当日不复权收盘价），得到「同样是这些分红，在每天的价格上折成几个点」的序列。
- * 再用今天的股息率在这 250 个交易日里排第几。股息率高 = 价格便宜，所以分位越高越便宜。
- */
-async function dyPercentile(secid, records) {
-  // 注意：分红金额是每份名义金额，价格必须用不复权（fqt=0），否则前复权价会把历史股息率抬高
-  const k = await emKline(secid, 300, 0);
-  const rows = k.filter((x) => x.close > 0).slice(-250);
-  if (rows.length < 60) throw new Error('价格序列太短');
-  const year = 365 * 86400000;
-  const lastTs = Date.parse(rows[rows.length - 1].date);
-  // 分子固定 = 最近 12 个月的分红合计；不再逐日滚动统计，避免某天窗口里少统计一笔而冒出 2.x% 的假谷
-  const ttm = records
-    .filter((r) => r.ts <= lastTs && r.ts > lastTs - year)
-    .reduce((s, r) => s + r.amount, 0);
-  if (!(ttm > 0)) throw new Error('近 12 个月没有分红，无法算股息率分位');
-  const series = rows
-    .map((row) => ({ date: row.date, dy: (ttm / row.close) * 100 }))
-    .filter((x) => isFinite(x.dy) && x.dy > 0);
-  const last = series[series.length - 1].dy;
-  // 刻度取「最低–最高」：分子已经固定，序列只由价格驱动，两端都是真实的价格波动，不再需要切分位数。
-  const vals = series.map((s) => s.dy).sort((a, b) => a - b);
-  const lo = vals[0];
-  const hi = vals[vals.length - 1];
-  const span = hi - lo || 1;
-  const pct = Math.max(0, Math.min(100, ((last - lo) / span) * 100));
-  return {
-    dyPct: round(pct, 1),
-    dyNow: round(last, 2),
-    // 刻度多留两位：前端要用这两个数把实时股息率换算成分位，舍入误差会直接体现在分位上
-    dyLow: round(lo, 4),
-    dyHigh: round(hi, 4),
-    dyMin: round(vals[0], 2),
-    dyMax: round(vals[vals.length - 1], 2),
-    dyTtm: round(ttm, 4),
-  };
-}
-
-/* ---------------- 国债收益率 ---------------- */
-
-/**
- * 中国 5 年期国债到期收益率（%），东财数据中心的中美国债收益率表。
- * EMM00166462 = 中国国债收益率5年，EMM00166466 = 10年（见 akshare bond_em 的字段映射）。
- */
-async function cn5yYield() {
-  const url =
-    'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPTA_WEB_TREASURYYIELD' +
-    '&columns=ALL&sortColumns=SOLAR_DATE&sortTypes=-1&pageSize=5&pageNumber=1';
-  const j = await getJSON(url, { Referer: 'https://data.eastmoney.com/' });
-  const rows = j?.result?.data || [];
-  for (const row of rows) {
-    const v = Number(row.EMM00166462);
-    if (Number.isFinite(v) && v > 0) {
-      return { y5: round(v, 4), y10: row.EMM00166466 == null ? null : round(Number(row.EMM00166466), 4), date: String(row.SOLAR_DATE || '').slice(0, 10) };
-    }
-  }
-  throw new Error('无国债收益率数据');
-}
-
-/* ---------------- 价格分位 ---------------- */
-/* ---------------- 价格分位 ---------------- */
-
-/**
- * 指数近 5 年收盘价分位：最新收盘在近 1250 个交易日里的位置。
- * 红利类指数多年上涨、PE 又长期下移，只看 PE 分位会显得「一直很贵」，
- * 价格分位是一个只跟价格有关的对照。
- */
-async function priceStat(indexSecid) {
-  const k = await emKline(indexSecid, 1300);
-  const closes = k.map((x) => x.close).filter((v) => v > 0);
-  if (closes.length < 200) throw new Error('价格序列太短');
-  const win = closes.slice(-1250);
-  const last = win[win.length - 1];
-  let below = 0;
-  for (const c of win) if (c <= last) below += 1;
-  return {
-    pricePct: round((below / win.length) * 100, 1),
-    pxLow: round(Math.min(...win), 2),
-    pxHigh: round(Math.max(...win), 2),
-    pxWindow: win.length,
-  };
-}
-
-/* ---------------- 净值 ---------------- */
-
-async function emNav(code) {
-  const url = `https://api.fund.eastmoney.com/f10/lsjz?fundCode=${code}&pageIndex=1&pageSize=1`;
-  const j = await getJSON(url, { Referer: 'https://fundf10.eastmoney.com/' });
-  const row = j?.Data?.LSJZList?.[0];
-  if (!row) throw new Error('净值为空');
-  return {
-    nav: Number(row.DWJZ),
-    navDate: row.FSRQ,
-    navChangePct: Number(row.JZZZL),
-    purchase: row.SGZT || '',
-  };
-}
-
-/* ---------------- 估值 ---------------- */
-
-async function danjuanValuation(srcKey) {
-  const hdr = { Referer: 'https://danjuanfunds.com/' };
-  const detail = await getJSON(`https://danjuanfunds.com/djapi/index_eva/detail/${srcKey}`, hdr);
-  if (!detail?.data) throw new Error(`蛋卷无数据（${srcKey}）`);
-  const d = detail.data;
-  let history = [];
-  try {
-    const h = await getJSON(`https://danjuanfunds.com/djapi/index_eva/pe_history/${srcKey}?day=5y`, hdr);
-    history = (h?.data?.index_eva_pe_growths || []).map((x) => [x.ts, round(x.pe, 3)]);
-  } catch {
-    history = [];
-  }
-  return {
-    pe: round(d.pe, 2),
-    pb: round(d.pb, 3),
-    pePct: toPct(d.pe_percentile),
-    pbPct: toPct(d.pb_percentile),
-    dy: toPct(d.yeild),
-    valDate: d.date ? `${new Date(d.ts).getUTCFullYear()}-${String(d.date).slice(0, 5)}` : null,
-    history,
-    note: '蛋卷基金指数估值',
-  };
-}
-
-/** 中证指数官网逐日 PE（920914 这类蛋卷没覆盖的指数用） */
-async function csindexValuation(indexCode) {
-  const url = `https://www.csindex.com.cn/csindex-home/perf/indexCsiDsPe?indexCode=${indexCode}`;
-  const j = await getJSON(url, { Referer: 'https://www.csindex.com.cn/' });
-  const rows = (j?.data || []).filter((x) => x.peg != null && Number.isFinite(Number(x.peg)));
-  if (!rows.length) throw new Error('中证 PE 为空');
-  const history = rows.map((x) => {
-    const s = String(x.tradeDate);
-    const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-    return [Date.parse(`${iso}T00:00:00+08:00`), round(Number(x.peg), 3)];
-  });
-  const window = history.slice(-1250); // 约 5 年（逐日）
-  const last = window[window.length - 1][1];
-  const below = window.filter(([, v]) => v < last).length;
-  // 曲线按周抽样，和蛋卷的 5 年周线口径一致
-  const weekly = [];
-  for (let i = 0; i < history.length; i += 5) weekly.push(history[i]);
-  if (weekly.length && weekly[weekly.length - 1][0] !== history[history.length - 1][0]) {
-    weekly.push(history[history.length - 1]);
-  }
-  return {
-    pe: round(last, 2),
-    pb: null,
-    pePct: round((below / window.length) * 100, 1),
-    pbPct: null,
-    dy: null,
-    valDate: new Date(history[history.length - 1][0]).toISOString().slice(0, 10),
-    history: weekly.slice(-1250),
-    note: '中证指数官网（自算 5 年 PE 分位）',
-  };
-}
-
-/* ---------------- QDII 公允净值 ---------------- */
-
 function closeOnOrBefore(rows, isoDate) {
   let hit = null;
   for (const r of rows) {
@@ -322,29 +150,42 @@ function closeOnOrBefore(rows, isoDate) {
   return hit;
 }
 
-async function fairNav(etf, nav, navDate) {
-  try {
-    const [idx, fx] = await Promise.all([emKline(etf.indexSecid, 40), emKline('133.USDCNH', 40)]);
-    const atNav = closeOnOrBefore(idx, navDate);
-    const last = idx[idx.length - 1];
-    const fxAtNav = closeOnOrBefore(fx, navDate);
-    const fxLast = fx[fx.length - 1];
-    if (!atNav || !last || !fxAtNav || !fxLast || !atNav.close || !fxAtNav.close) throw new Error('缺少指数/汇率数据');
-    const ratio = (last.close / atNav.close) * (fxLast.close / fxAtNav.close);
-    return {
-      fairNav: round(nav * ratio, 3),
-      basis: `${etf.indexName} ${atNav.close}→${last.close}（${atNav.date}→${last.date}），USDCNH ${fxAtNav.close}→${fxLast.close}`,
-    };
-  } catch (e) {
-    return { fairNav: null, basis: `公允净值估算失败：${e.message}` };
+/* ---------------- 净值 ---------------- */
+
+/** 最近 n 条净值：[{ date, nav }]，用于算溢价历史。接口每页最多 20 条，要翻页。 */
+async function emNavHistory(code, want = 260) {
+  const pageSize = 20;
+  const pages = Math.min(20, Math.ceil(want / pageSize));
+  const all = [];
+  for (let p = 1; p <= pages; p += 1) {
+    const url = `https://api.fund.eastmoney.com/f10/lsjz?fundCode=${code}&pageIndex=${p}&pageSize=${pageSize}`;
+    const j = await getJSON(url, { Referer: 'https://fundf10.eastmoney.com/' });
+    const rows = j?.Data?.LSJZList || [];
+    if (!rows.length) break;
+    all.push(...rows);
+    if (rows.length < pageSize) break;
   }
+  const j0 = { Data: { LSJZList: all } };
+  const j = j0;
+  const list = j?.Data?.LSJZList || [];
+  const rows = list
+    .map((r) => ({ date: r.FSRQ, nav: Number(r.DWJZ) }))
+    .filter((r) => r.nav > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (!rows.length) throw new Error('净值为空');
+  const last = list[0];
+  return {
+    rows,
+    nav: Number(last.DWJZ),
+    navDate: last.FSRQ,
+    navChangePct: Number(last.JZZZL),
+  };
 }
 
 /* ---------------- 分红 ---------------- */
 
 /** 近 365 天每份现金分红合计（元/份）。数据来自天天基金「分红送配」页。 */
 async function emDividend(code) {
-  // 天天基金偶尔会返回结构异常的页面，单笔每份派现超过 0.2 元基本可判定是误解析，重试一次再放弃
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -378,11 +219,6 @@ async function emDividend(code) {
         await sleep(600);
         continue;
       }
-      if (count > 0 && sum / count > 0.2) {
-        lastErr = new Error('分红表解析异常（均值过大）');
-        await sleep(600);
-        continue;
-      }
       records.sort((a, b) => a.ts - b.ts);
       return { ttmDiv: round(sum, 4) || 0, divCount: count, records };
     } catch (e) {
@@ -393,37 +229,98 @@ async function emDividend(code) {
   throw lastErr || new Error('分红表获取失败');
 }
 
+/* ---------------- 分位工具 ---------------- */
+
+/** 把序列线性映射到 0–100，返回分位与两端刻度 */
+function toScale(last, values) {
+  const vals = values.slice().sort((a, b) => a - b);
+  const lo = vals[0];
+  const hi = vals[vals.length - 1];
+  const span = hi - lo || 1;
+  const pct = Math.max(0, Math.min(100, ((last - lo) / span) * 100));
+  return { pct: round(pct, 1), lo: round(lo, 4), hi: round(hi, 4), n: vals.length };
+}
+
+/**
+ * 股息率分位：分红金额固定（最近 12 个月每份分红合计），逐日只换分母（不复权收盘价）。
+ * 股息率高 = 价格便宜，所以分位越高越便宜。
+ */
+async function dividendStat(secid, records) {
+  const k = await emKline(secid, 300, 0);
+  const rows = k.filter((x) => x.close > 0).slice(-250);
+  if (rows.length < 60) throw new Error('价格序列太短');
+  const year = 365 * 86400000;
+  const lastTs = Date.parse(rows[rows.length - 1].date);
+  const ttm = records
+    .filter((r) => r.ts <= lastTs && r.ts > lastTs - year)
+    .reduce((s, r) => s + r.amount, 0);
+  if (!(ttm > 0)) throw new Error('近 12 个月没有分红');
+  const series = rows.map((row) => (ttm / row.close) * 100).filter((v) => isFinite(v) && v > 0);
+  const s = toScale(series[series.length - 1], series);
+  return { dyPct: s.pct, dyLow: s.lo, dyHigh: s.hi, dyTtm: round(ttm, 4), dyNow: round(series[series.length - 1], 2) };
+}
+
+/**
+ * 溢价分位（QDII 用）：逐日还原公允净值 = 当日净值 × 指数涨跌 × 汇率涨跌，
+ * 再算 场内价 ÷ 公允净值 − 1，得到近 1 年的溢价序列。溢价越高越贵。
+ */
+async function premiumStat(cfg, navRows) {
+  const [px, idx, fx] = await Promise.all([
+    emKline(cfg.secid, 300, 1),
+    emKline(cfg.indexSecid, 300, 1),
+    emKline('133.USDCNH', 300, 1),
+  ]);
+  const rows = px.filter((r) => r.close > 0).slice(-250);
+  if (rows.length < 60) throw new Error('价格序列太短');
+  const series = [];
+  for (const r of rows) {
+    const nv = closeOnOrBefore(navRows, r.date);
+    if (!nv) continue;
+    const iAtNav = closeOnOrBefore(idx, nv.date);
+    const iNow = closeOnOrBefore(idx, r.date);
+    const fAtNav = closeOnOrBefore(fx, nv.date);
+    const fNow = closeOnOrBefore(fx, r.date);
+    if (!iAtNav || !iNow || !fAtNav || !fNow) continue;
+    if (!iAtNav.close || !iNow.close || !fAtNav.close || !fNow.close) continue;
+    const fair = nv.nav * (iNow.close / iAtNav.close) * (fNow.close / fAtNav.close);
+    if (!(fair > 0)) continue;
+    series.push((r.close / fair - 1) * 100);
+  }
+  if (series.length < 30) throw new Error('溢价序列太短');
+  const s = toScale(series[series.length - 1], series);
+  return { premPct: s.pct, premLow: s.lo, premHigh: s.hi, premNow: round(series[series.length - 1], 2) };
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function buildOne(cfg, quotes) {
+  const isDiv = cfg.family === 'dividend';
   const out = {
-    ...cfg,
+    code: cfg.code,
+    name: cfg.name,
+    fullName: cfg.fullName,
+    indexCode: cfg.indexCode,
+    indexName: cfg.indexName,
+    market: cfg.market,
+    family: cfg.family,
+    secid: cfg.secid,
+    indexSecid: cfg.indexSecid,
+    iopvMode: cfg.iopvMode,
     price: null,
     changePct: null,
     quoteTime: null,
     nav: null,
     navDate: null,
     navChangePct: null,
-    purchase: '',
-    fairNav: null,
-    fairBasis: null,
-    pe: null,
-    pb: null,
-    pePct: null,
-    pbPct: null,
-    pricePct: null,
-    pxLow: null,
-    pxHigh: null,
+    ttmDiv: null,
+    divCount: 0,
+    dy: null,
     dyPct: null,
     dyLow: null,
     dyHigh: null,
-    composite: null,
-    dy: null,
-    ttmDiv: null,
-    divCount: 0,
-    valDate: null,
-    history: [],
-    valNote: '',
+    premPct: null,
+    premLow: null,
+    premHigh: null,
   };
 
   const q = quotes[cfg.code];
@@ -433,80 +330,55 @@ async function buildOne(cfg, quotes) {
     out.quoteTime = q.quoteTime ? q.quoteTime.toISOString() : null;
   }
 
+  let navRows = [];
   try {
-    const nav = await emNav(cfg.code);
-    Object.assign(out, nav);
+    const nav = await emNavHistory(cfg.code);
+    navRows = nav.rows;
+    out.nav = nav.nav;
+    out.navDate = nav.navDate;
+    out.navChangePct = nav.navChangePct;
   } catch (e) {
     out.navError = e.message;
   }
 
-  // 盘中估算净值要用「净值日当天的指数收盘」做锚点，否则跨休市日会重复计算涨跌
-  if (cfg.iopvMode === 'index' && out.nav && out.navDate) {
-    try {
-      const k = await emKline(cfg.indexSecid, 40);
-      const anchor = closeOnOrBefore(k, out.navDate);
-      if (anchor) {
-        out.navIdxClose = anchor.close;
-        out.navIdxDate = anchor.date;
+  if (isDiv) {
+    // 盘中估算净值要用「净值日当天的指数收盘」做锚点
+    if (cfg.iopvMode === 'index' && out.nav && out.navDate) {
+      try {
+        const k = await emKline(cfg.indexSecid, 40);
+        const anchor = closeOnOrBefore(k, out.navDate);
+        if (anchor) {
+          out.navIdxClose = anchor.close;
+          out.navIdxDate = anchor.date;
+        }
+      } catch (e) {
+        out.idxError = e.message;
       }
+    }
+    try {
+      const div = await emDividend(cfg.code);
+      out.ttmDiv = div.ttmDiv;
+      out.divCount = div.divCount;
+      if (div.ttmDiv > 0 && div.records.length) {
+        const s = await dividendStat(cfg.secid, div.records);
+        out.dyPct = s.dyPct;
+        out.dyLow = s.dyLow;
+        out.dyHigh = s.dyHigh;
+      }
+      out.dy = out.price && out.ttmDiv != null ? round((out.ttmDiv / out.price) * 100, 2) : null;
     } catch (e) {
-      out.navError = `指数锚点失败：${e.message}`;
+      out.divError = e.message;
+    }
+  } else {
+    try {
+      const s = await premiumStat(cfg, navRows);
+      out.premPct = s.premPct;
+      out.premLow = s.premLow;
+      out.premHigh = s.premHigh;
+    } catch (e) {
+      out.premError = e.message;
     }
   }
-
-  if (cfg.iopvMode === 'fair' && out.nav && out.navDate) {
-    const f = await fairNav(cfg, out.nav, out.navDate);
-    out.fairNav = f.fairNav;
-    out.fairBasis = f.basis;
-  }
-
-  try {
-    const v = cfg.valSource === 'csindex' ? await csindexValuation(cfg.valKey) : await danjuanValuation(cfg.valKey);
-    Object.assign(out, {
-      pe: v.pe,
-      pb: v.pb,
-      pePct: v.pePct,
-      pbPct: v.pbPct,
-      dy: v.dy,
-      valDate: v.valDate,
-      history: v.history.slice(-1250),
-      valNote: v.note,
-    });
-  } catch (e) {
-    out.valError = e.message;
-  }
-
-  // 股息率用这只 ETF 自己的实际分红（近 12 个月每份分红 ÷ 现价），不用指数的估算值
-  try {
-    const div = await emDividend(cfg.code);
-    out.ttmDiv = div.ttmDiv;
-    out.divCount = div.divCount;
-    if (div.ttmDiv > 0 && div.records.length) {
-      const dstat = await dyPercentile(cfg.secid, div.records);
-      out.dyPct = dstat.dyPct;
-      out.dyLow = dstat.dyLow;
-      out.dyHigh = dstat.dyHigh;
-      out.dyHistoryBasis = '近 250 个交易日，按每日收盘价与滚动 12 个月分红还原';
-    }
-    const px = out.price || null;
-    out.dy = px && out.ttmDiv != null ? round((out.ttmDiv / px) * 100, 2) : null;
-  } catch (e) {
-    out.divError = e.message;
-  }
-
-  // 价格分位
-  try {
-    const ps = await priceStat(cfg.indexSecid);
-    out.pricePct = ps.pricePct;
-    out.pxLow = ps.pxLow;
-    out.pxHigh = ps.pxHigh;
-  } catch (e) {
-    out.pxError = e.message;
-  }
-
-  // 综合分位：PE / PB / 价格三个分位的均值，缺哪个就跳过哪个
-  const parts = [out.pePct, out.pbPct, out.pricePct].filter((v) => v != null);
-  out.composite = parts.length ? round(parts.reduce((a, b) => a + b, 0) / parts.length, 1) : null;
 
   return out;
 }
@@ -525,33 +397,23 @@ async function main() {
     try {
       const one = await buildOne(cfg, quotes);
       etfs.push(one);
-      console.log(
-        `✓ ${one.code} ${one.name}  价 ${one.price ?? '--'} (${one.changePct ?? '--'}%)  ` +
-          `净值 ${one.nav ?? '--'}@${one.navDate ?? '--'}  PE ${one.pe ?? '--'} 分位 ${one.pePct ?? '--'}%  ` +
-          `DY ${one.dy ?? '--'}%  曲线 ${one.history.length} 点`,
-      );
+      const extra = cfg.family === 'dividend'
+        ? `股息率 ${one.dy ?? '--'}%  分位 ${one.dyPct ?? '--'}%`
+        : `溢价分位 ${one.premPct ?? '--'}%`;
+      console.log(`✓ ${one.code} ${one.name}  价 ${one.price ?? '--'} (${one.changePct ?? '--'}%)  ${extra}`);
     } catch (e) {
       console.warn(`✗ ${cfg.code} ${cfg.name} 失败：${e.message}`);
-      etfs.push({ ...cfg, pe: null, pb: null, pePct: null, dy: null, valDate: null, history: [], error: e.message });
+      etfs.push({ ...cfg, error: e.message });
     }
     await sleep(400);
-  }
-
-  let treasury = null;
-  try {
-    treasury = await cn5yYield();
-    console.log(`✓ 5 年期国债收益率 ${treasury.y5}%（${treasury.date}）`);
-  } catch (e) {
-    console.warn(`✗ 国债收益率失败：${e.message}`);
   }
 
   const now = new Date();
   const payload = {
     generatedAt: now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
     generatedAtISO: now.toISOString(),
-    model: 'pe-percentile-5y-v1',
-    source: '东方财富行情 · 蛋卷基金估值 · 中证指数官网 · 中债国债收益率',
-    treasury,
+    model: 'dividend-and-premium-v2',
+    source: '东方财富行情 · 天天基金净值与分红',
     etfs,
   };
 
