@@ -7,11 +7,11 @@
   var ETFS = Array.isArray(DATA.etfs) ? DATA.etfs : [];
   
   var LEVELS = [
-    { cls: 'lv-cheap', label: '便宜', action: '可加仓', mult: 1.5, desc: '估值处于近 5 年低位，值得多买' },
+    { cls: 'lv-cheap', label: '便宜', action: '可加仓', mult: 1.5, desc: '估值处于近 1 年低位，值得多买' },
     { cls: 'lv-low',   label: '偏低', action: '正常买', mult: 1.2, desc: '估值低于历史中位，可以正常买' },
     { cls: 'lv-fair',  label: '适中', action: '正常买入', mult: 1.0, desc: '估值在中位附近，正常买入' },
     { cls: 'lv-warm',  label: '偏高', action: '少买', mult: 0.6, desc: '估值已高于历史中位，减少买入' },
-    { cls: 'lv-rich',  label: '偏贵', action: '暂停买入', mult: 0.2, desc: '估值处于近 5 年高位，暂停买入等回落' }
+    { cls: 'lv-rich',  label: '偏贵', action: '暂停买入', mult: 0.2, desc: '估值处于近 1 年高位，暂停买入等回落' }
   ];
 
   var state = {
@@ -328,13 +328,15 @@
     var e = m.etf, L = LEVELS[m.level];
     var chgCls = m.chg > 0 ? 'is-up' : (m.chg < 0 ? 'is-down' : 'is-flat');
     var kvRows = m.isDiv ? [
-      ['股息率分位（1 年）', pctText(m.dyPct) + (e.dyLow == null ? '' : '（一年最低–最高 ' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
+      ['股息率分位（1 年）', pctText(m.dyPct) + (e.dyLow == null ? '' : '（' + num(e.dyLow, 2) + '%–' + num(e.dyHigh, 2) + '%）')],
       ['股息率', dyText(m.dy)],
+      ['10 年期国债', DATA.treasury ? num(DATA.treasury.y10, 2) + '%（' + DATA.treasury.date + '）' : '—'],
+      ['股息利差', (m.dy != null && DATA.treasury) ? signed(m.dy - DATA.treasury.y10, 2) : '—', (m.dy != null && DATA.treasury) ? ((m.dy - DATA.treasury.y10) > 0 ? 'is-down' : 'is-up') : ''],
       ['近 12 月分红', e.ttmDiv == null ? '—' : num(e.ttmDiv, 4) + ' 元/份'],
       ['估算净值', num(m.iopv, 4)],
       ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')]
     ] : [
-      ['溢价分位（1 年）', pctText(m.premPct) + (e.premLow == null ? '' : '（一年最低–最高 ' + signed(e.premLow, 1) + '–' + signed(e.premHigh, 1) + '）')],
+      ['溢价分位（1 年）', pctText(m.premPct) + (e.premLow == null ? '' : '（' + signed(e.premLow, 1) + '–' + signed(e.premHigh, 1) + '）')],
       ['场内溢价', signed(m.premium, 2), premTone(m.premium)],
       ['估算净值', num(m.iopv, 4)],
       ['最新净值', num(e.nav, 4) + (e.navDate ? '（' + e.navDate + '）' : '')]

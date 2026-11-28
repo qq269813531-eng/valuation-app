@@ -294,6 +294,23 @@ async function premiumStat(cfg, navRows) {
 
 /* ---------------- 主流程 ---------------- */
 
+// 10 年期国债收益率（东方财富数据中心，日频）
+async function treasury10y() {
+  const url =
+    'https://datacenter-web.eastmoney.com/api/data/v1/get' +
+    '?reportName=RPTA_WEB_TREASURYYIELD&columns=ALL' +
+    '&sortColumns=SOLAR_DATE&sortTypes=-1&pageSize=5&pageNumber=1';
+  const j = JSON.parse(await getText(url, { Referer: 'https://data.eastmoney.com/' }));
+  const rows = (j.result && j.result.data) || [];
+  for (const r of rows) {
+    const y = Number(r.EMM00166466);
+    if (isFinite(y) && y > 0) {
+      return { y10: Math.round(y * 10000) / 10000, date: String(r.SOLAR_DATE).slice(0, 10) };
+    }
+  }
+  throw new Error('10 年期国债收益率为空');
+}
+
 async function buildOne(cfg, quotes) {
   const isDiv = cfg.family === 'dividend';
   const out = {
@@ -409,12 +426,21 @@ async function main() {
     await sleep(400);
   }
 
+  let treasury = null;
+  try {
+    treasury = await treasury10y();
+    console.log(`✓ 10 年期国债 ${treasury.y10}%（${treasury.date}）`);
+  } catch (e) {
+    console.warn('✗ 10 年期国债获取失败：', e.message);
+  }
+
   const now = new Date();
   const payload = {
     generatedAt: now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
     generatedAtISO: now.toISOString(),
     model: 'dividend-and-premium-v2',
-    source: '东方财富行情 · 天天基金净值与分红',
+    source: '东方财富行情 · 天天基金净值与分红 · 东方财富国债收益率',
+    treasury,
     etfs,
   };
 
